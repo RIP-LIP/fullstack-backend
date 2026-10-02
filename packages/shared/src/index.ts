@@ -93,3 +93,92 @@ export const Product = z.object({
 })
 
 export type Product = z.infer<typeof Product>
+
+/* ------------------------------------------------------------------ *
+ * 订单
+ * ------------------------------------------------------------------ */
+
+/**
+ * 订单状态。
+ *
+ * **这是状态机，不是枚举。** 五个值之间的合法转移只有五个方向的边，
+ * 任意两个值之间都**不是**可以互转的——`cancelled` 之后不能再 `paid`。
+ *
+ * 值域由数据库的 CHECK 约束守着（001 迁移里那条 `status IN (...)`），
+ * 但**转移规则数据库不管**：CHECK 只能检查这一列的值，
+ * 不知道这一行之前是什么状态。所以转移必须由代码判断。
+ * 完整的说明见 guide/deep/ch07。
+ */
+export const ORDER_STATUSES = ['pending', 'paid', 'shipped', 'completed', 'cancelled'] as const
+export type OrderStatus = (typeof ORDER_STATUSES)[number]
+
+/**
+ * 建订单的入参。
+ *
+ * `items` 至少一项、最多 50 项。**上限是必要的**：不设上限的话，
+ * 一个请求可以带一万项，事务体会跑很久，而事务期间整条数据库连接被别人排队等着
+ * （见 db/index.ts 里 transaction 的注释）。
+ *
+ * 同一个 productId 出现两次是允许的，要不要合并是业务决定，
+ * 这里不替调用方做——数据库的 order_items 每行一件，合并了数量对得上就行。
+ */
+export const CreateOrderInput = z.object({
+  userId: z
+    .number({ required_error: 'userId 不能为空', invalid_type_error: 'userId 必须是数字' })
+    .int('userId 必须是整数')
+    .min(1, 'userId 必须是正整数'),
+  items: z
+    .array(
+      z.object({
+        productId: z
+          .number({ required_error: 'productId 不能为空', invalid_type_error: 'productId 必须是数字' })
+          .int('productId 必须是整数')
+          .min(1, 'productId 必须是正整数'),
+        quantity: z
+          .number({ required_error: '数量不能为空', invalid_type_error: '数量必须是数字' })
+          .int('数量必须是整数')
+          .min(1, '数量至少是 1')
+          .max(999, '单个商品一次最多 999 件'),
+      }),
+    )
+    .min(1, '订单至少要有一项')
+    .max(50, '一个订单最多 50 项'),
+})
+export type CreateOrderInput = z.infer<typeof CreateOrderInput>
+
+/** 状态转移的入参。 */
+export const TransitionInput = z.object({
+  to: z.enum(ORDER_STATUSES, {
+    required_error: 'to 不能为空',
+    invalid_type_error: `to 必须是 ${ORDER_STATUSES.join(' / ')} 之一`,
+  }),
+})
+export type TransitionInput = z.infer<typeof TransitionInput>
+
+/**
+ * 订单明细。
+ *
+ * `unitPriceCents` 是**下单那一刻的价格快照**，不是商品现在的价格。
+ * 商品改价之后，接口返回的这一项不会变——历史订单的金额必须是当时那个。
+ * 反过来说，如果这里改成 join `products` 查现价，
+ * 改一次价就会改掉所有历史订单的金额，而没有任何报错。
+ */
+export const OrderItem = z.object({
+  productId: z.number().int(),
+  quantity: z.number().int(),
+  unitPriceCents: z.number().int(),
+  /** 快照里的商品名。同样是下单那一刻的。 */
+  productTitle: z.string(),
+})
+export type OrderItem = z.infer<typeof OrderItem>
+
+/** 对外返回的订单。 */
+export const Order = z.object({
+  id: z.number().int(),
+  userId: z.number().int(),
+  status: z.enum(ORDER_STATUSES),
+  totalCents: z.number().int(),
+  createdAt: z.string(),
+  items: z.array(OrderItem),
+})
+export type Order = z.infer<typeof Order>

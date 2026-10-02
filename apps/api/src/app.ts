@@ -2,6 +2,7 @@ import express from 'express'
 import type { HealthResponse } from '@fullstack/shared'
 import { toApiError } from './errors.ts'
 import { productsRouter } from './routes/products.ts'
+import { ordersRouter } from './routes/orders.ts'
 
 /**
  * 组装 Express 应用，导出 app 本身。
@@ -22,6 +23,9 @@ export function createApp() {
 
   // 商品接口：数据存储那批表就是为它建的
   app.use('/api', productsRouter)
+
+  // 订单接口：一次要改三张表，是事务那一章的载体
+  app.use('/api', ordersRouter)
 
   // 404：路由没匹配到任何路径。
   app.use((req, res) => {

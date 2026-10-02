@@ -68,6 +68,8 @@ export type ProductBody = {
   id: number
   sku: string
   name: string
+  /** ch06 之后 title 也在返回，name 是老键。 */
+  title: string
   priceCents: number
   stock: number
   createdAt: string
@@ -99,6 +101,22 @@ export async function createProduct(
 
 export type ErrorBody = {
   error: { code: string; message: string; fields?: Record<string, string> }
+}
+
+/**
+ * 建一个用户，返回它的 id。
+ *
+ * 没有用户接口——`users` 表建了但一直没有对外的接口。
+ * 测试需要它是因为订单必须属于某个用户（外键约束），所以这里直接写库。
+ * 用 rawDb 而不走 fetch，因为没有接口可调。
+ */
+let userSeq = 0
+export function createUser(rawDb: DatabaseSync): number {
+  userSeq += 1
+  const email = `user-${userSeq}@example.test`
+  rawDb.prepare('INSERT INTO users (email, created_at) VALUES (?, ?)').run(email, new Date().toISOString())
+  const row = rawDb.prepare('SELECT id FROM users WHERE email = ?').get(email) as { id: number }
+  return row.id
 }
 
 /** 发一个请求，返回状态码和解析后的错误体。 */

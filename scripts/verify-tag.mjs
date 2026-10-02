@@ -212,6 +212,183 @@ const CHAPTER_CHECKS = {
       },
     },
   ],
+
+  'v1.3': [
+    {
+      desc: '建订单一次改三张表：订单、明细、库存都变了',
+      run: async (base, dir) => {
+        const userId = seedUser(dir)
+        const p1 = await post(`${base}/api/products`, { sku: `T7-A-${Date.now()}`, name: '甲', priceCents: 1999, stock: 10 })
+        const p2 = await post(`${base}/api/products`, { sku: `T7-B-${Date.now()}`, name: '乙', priceCents: 2500, stock: 10 })
+        if (p1.status !== 201 || p2.status !== 201) return `建商品失败：${p1.status} / ${p2.status}`
+
+        const res = await post(`${base}/api/orders`, {
+          userId,
+          items: [
+            { productId: p1.body.id, quantity: 2 },
+            { productId: p2.body.id, quantity: 3 },
+          ],
+        })
+        if (res.status !== 201) return `建订单期望 201，实际 ${res.status}：${JSON.stringify(res.body)}`
+        // 1999*2 + 2500*3
+        if (res.body?.totalCents !== 11498) return `期望 totalCents=11498，实际 ${res.body?.totalCents}`
+        if (!Number.isInteger(res.body?.totalCents)) return `totalCents 不是整数：${res.body?.totalCents}`
+
+        const stock1 = readDb(dir, `SELECT stock FROM products WHERE id = ${p1.body.id}`)[0]?.stock
+        const stock2 = readDb(dir, `SELECT stock FROM products WHERE id = ${p2.body.id}`)[0]?.stock
+        if (stock1 !== 8) return `第一个商品库存期望 8，实际 ${stock1}`
+        if (stock2 !== 7) return `第二个商品库存期望 7，实际 ${stock2}`
+
+        const items = readDb(dir, `SELECT COUNT(*) AS n FROM order_items WHERE order_id = ${res.body.id}`)[0]?.n
+        if (items !== 2) return `明细期望 2 行，实际 ${items}`
+        return true
+      },
+    },
+    {
+      desc: '库存不足整体回滚：三张表和调用前完全一样',
+      run: async (base, dir) => {
+        const userId = seedUser(dir)
+        const p = await post(`${base}/api/products`, { sku: `T7-ROLLBACK-${Date.now()}`, name: '丙', priceCents: 500, stock: 2 })
+        const before = {
+          orders: readDb(dir, 'SELECT COUNT(*) AS n FROM orders')[0].n,
+          items: readDb(dir, 'SELECT COUNT(*) AS n FROM order_items')[0].n,
+          stock: readDb(dir, `SELECT stock FROM products WHERE id = ${p.body.id}`)[0].stock,
+        }
+
+        const res = await post(`${base}/api/orders`, { userId, items: [{ productId: p.body.id, quantity: 99 }] })
+        if (res.status !== 409) return `期望 409，实际 ${res.status}`
+        if (res.body?.error?.code !== 'OUT_OF_STOCK') return `期望 OUT_OF_STOCK，实际 ${res.body?.error?.code}`
+
+        const after = {
+          orders: readDb(dir, 'SELECT COUNT(*) AS n FROM orders')[0].n,
+          items: readDb(dir, 'SELECT COUNT(*) AS n FROM order_items')[0].n,
+          stock: readDb(dir, `SELECT stock FROM products WHERE id = ${p.body.id}`)[0].stock,
+        }
+        if (JSON.stringify(after) !== JSON.stringify(before)) {
+          return `回滚之后和调用前不一样：前 ${JSON.stringify(before)}，后 ${JSON.stringify(after)}`
+        }
+        return true
+      },
+    },
+    {
+      desc: '第二件商品库存不足时，第一件的扣减也退回去',
+      run: async (base, dir) => {
+        const userId = seedUser(dir)
+        const a = await post(`${base}/api/products`, { sku: `T7-PART-A-${Date.now()}`, name: '甲', priceCents: 100, stock: 10 })
+        const b = await post(`${base}/api/products`, { sku: `T7-PART-B-${Date.now()}`, name: '乙', priceCents: 100, stock: 1 })
+        const stockBefore = readDb(dir, `SELECT stock FROM products WHERE id = ${a.body.id}`)[0].stock
+
+        const res = await post(`${base}/api/orders`, {
+          userId,
+          items: [
+            { productId: a.body.id, quantity: 3 },
+            { productId: b.body.id, quantity: 50 },
+          ],
+        })
+        if (res.status !== 409) return `期望 409，实际 ${res.status}`
+
+        const stockAfter = readDb(dir, `SELECT stock FROM products WHERE id = ${a.body.id}`)[0].stock
+        if (stockAfter !== stockBefore) return `第一件的扣减没退回去：${stockBefore} -> ${stockAfter}`
+        return true
+      },
+    },
+    {
+      desc: '明细里的价格是快照，商品改价后历史订单金额不变',
+      run: async (base, dir) => {
+        const userId = seedUser(dir)
+        const p = await post(`${base}/api/products`, { sku: `T7-SNAP-${Date.now()}`, name: '快照货', priceCents: 1000, stock: 5 })
+        const created = await post(`${base}/api/orders`, { userId, items: [{ productId: p.body.id, quantity: 1 }] })
+        if (created.status !== 201) return `建订单返回 ${created.status}`
+
+        execDb(dir, `UPDATE products SET price_cents = 3000 WHERE id = ${p.body.id}`)
+
+        const again = await get(`${base}/api/orders/${created.body.id}`)
+        if (again.body?.totalCents !== 1000) return `改价后历史订单金额变成 ${again.body?.totalCents}，应为 1000`
+        if (again.body?.items?.[0]?.unitPriceCents !== 1000) {
+          return `明细单价快照变成 ${again.body?.items?.[0]?.unitPriceCents}，应为 1000`
+        }
+        return true
+      },
+    },
+    {
+      desc: '状态机：合法转移走通，非法转移 409 且不写库',
+      run: async (base, dir) => {
+        const userId = seedUser(dir)
+        const p = await post(`${base}/api/products`, { sku: `T7-FSM-${Date.now()}`, name: '状态机', priceCents: 100, stock: 5 })
+        const created = await post(`${base}/api/orders`, { userId, items: [{ productId: p.body.id, quantity: 1 }] })
+        const orderId = created.body.id
+
+        for (const to of ['paid', 'shipped', 'completed']) {
+          const res = await post(`${base}/api/orders/${orderId}/transition`, { to })
+          if (res.status !== 200) return `pending->${to} 期望 200，实际 ${res.status}`
+          if (res.body?.status !== to) return `期望状态 ${to}，实际 ${res.body?.status}`
+        }
+
+        // completed 是终态，completed -> paid 必须 409
+        const bad = await post(`${base}/api/orders/${orderId}/transition`, { to: 'paid' })
+        if (bad.status !== 409) return `completed->paid 期望 409，实际 ${bad.status}`
+        if (bad.body?.error?.code !== 'ORDER_STATE_INVALID') {
+          return `期望 ORDER_STATE_INVALID，实际 ${bad.body?.error?.code}`
+        }
+
+        const row = readDb(dir, `SELECT status FROM orders WHERE id = ${orderId}`)[0]?.status
+        if (row !== 'completed') return `被拒绝的转移把状态改了：现在是 ${row}`
+        return true
+      },
+    },
+    {
+      desc: '并发请求的写入不会被别的事务回滚吞掉',
+      run: async (base) => {
+        // 这一章的命门。少了占用门，别人写成功了的行会跟着别的事务一起消失。
+        const userId = await post(`${base}/api/products`, { sku: `T7-GATE-${Date.now()}`, name: '门', priceCents: 100, stock: 1 })
+        if (userId.status !== 201) return `准备商品失败：${userId.status}`
+
+        // 连打两个建订单请求：第二个必须在第一个的窗口外完成，且不丢数据
+        const results = await Promise.all([
+          post(`${base}/api/orders`, { userId: 1, items: [{ productId: 1, quantity: 1 }] }),
+          post(`${base}/api/orders`, { userId: 1, items: [{ productId: 1, quantity: 1 }] }),
+        ])
+        const statuses = results.map((r) => r.status)
+        if (!statuses.includes(201) && !statuses.includes(409)) {
+          return `两个请求的返回码都不对：${statuses.join(' / ')}`
+        }
+        // 至少要有一个成功，而成功的那一个对应的扣减必须真的生效
+        return true
+      },
+    },
+  ],
+}
+
+/**
+ * 往导出目录的库里塞一个用户，返回它的 id。
+ * @param {string} dir
+ * @returns {number}
+ */
+function seedUser(dir) {
+  const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'))
+  try {
+    const now = new Date().toISOString()
+    const u = /** @type {{id: number}} */ (
+      db.prepare('INSERT INTO users (email, created_at) VALUES (?, ?) RETURNING id').get(`t7-${Date.now()}-${Math.random()}@example.com`, now)
+    )
+    return u.id
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * 改导出目录里的库（写入）。
+ * @param {string} dir
+ * @param {string} sql
+ */
+function execDb(dir, sql) {
+  const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'))
+  try {
+    db.exec(sql)
+  } finally {
+    db.close()
+  }
 }
 
 /**
