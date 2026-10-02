@@ -36,8 +36,9 @@ S3（ch06 零停机变更）已完成。ch07 起未开始。
 
 ## ch06 实跑确认的事实
 
-**JSON.stringify 会删掉值为 undefined 的键。** 直觉做法 `ALTER TABLE ... RENAME COLUMN name TO title`
-跑完之后老代码 `row.name` 是 `undefined`，响应里 `name` **整个键消失**——不报错、不警告：
+### JSON.stringify 会删掉值为 undefined 的键
+
+直觉做法 `ALTER TABLE ... RENAME COLUMN name TO title` 跑完之后，老代码 `row.name` 是 `undefined`，响应里 `name` **整个键消失**——不报错、不警告：
 
 ```
 映射对象里 name 的值: undefined
@@ -127,10 +128,39 @@ scripts/backfill.mjs          ch06 的分批回填（幂等 + 可中断 + 进度
 ch07 要处理「建订单同时动三张表」。`Db.transaction` 已经在 `sqlite.ts` 里实现好了，直接用。
 
 **载体上要注意的**：`orders` 和 `order_items` 两张表建了但**没有接口**（ch04 只做了
-products）。ch07 得先把建订单的路径写出来，代码量比 ch06 大。
+products）。ch07 得先把建订单的路径写出来。
 
 订单状态机的取值域已被 `CHECK` 钉住（`pending` / `paid` / `shipped` / `completed` /
 `cancelled`），但**转移规则还没实现**——那是 ch07 的核心内容。
+
+### ch07 的量要重新估
+
+ch06 是「加一列 + 改几处映射 + 写一个脚本」，代码改动集中在两个文件。
+**ch07 要新建订单接口 + 状态机转移规则 + 三表事务边界 + 对应的测试文件**，
+量大概是 ch06 的两到三倍。
+
+**如果 S4 还想一次做两章，很可能又得中途切。** 切的时候照旧：
+`v1.3` 正常提交 + `verify-tag` 验过 + 写完文档，**别为了「一次做完」跳过验证**。
+S2 审查报告里已经因为这个原因重做过一次。
+
+### 查过了，不用再查的两件事
+
+1. **`migrate.test.ts` 里那条写死列名的断言是安全的。** 它显式只跑
+   `migrate(db, [m001, m002])`，不经过 `allMigrations`，所以加 004 不会弄红它。
+   （另一条断言条数的已经改成对着 `allMigrations.length` 比，S2 就修过了。）
+
+2. **`Product` 这个 zod schema 从来没被用来校验响应体**，只是类型。
+   `rowToProduct` 返回的对象直接 `res.json()`。所以给 `Product` 加字段不会
+   引发「响应和 schema 对不上」的报错——但也意味着**它现在没有运行时保护力**，
+   ch07 之后要不要真的拿它校验响应，是可以单独决定的一件事。
+
+### ch07 大概会踩的坑（提前记下，动手时验一遍）
+
+- **嵌套事务**：`sqlite.ts` 的 `transaction` 不支持嵌套（事务套事务会直接报错），
+  这是刻意的。ch07 如果需要分层，先看清楚这一点再决定边界画在哪。
+- **事务里不要做 IO**：发邮件、发消息、调第三方 HTTP 圈进事务，会让事务从毫秒
+  变秒，锁一直占着。ch07 的三张表都是本地写库，没有这个问题，但写示例时别顺手
+  加一个「同时发个通知」。
 
 ## 硬约束
 
@@ -152,34 +182,12 @@ products）。ch07 得先把建订单的路径写出来，代码量比 ch06 大�
   写进文件用 `git commit -F 文件`，文件也**别放在仓库里**（会被 `git add -A` 带进去），
   放 `%TEMP%`
 
-## 已经验过的
-
-| 项 | 结果 |
-| --- | --- |
-| `npm run verify` | 退出 0（typecheck + 47 tests / 0 fail） |
-| `npm test` | 47 tests / 17 suites / 0 fail |
-| `node scripts/verify-tag.mjs v1.0` | 走完八步，导出目录里 35 tests 全跑，**本章验证命令 5/5**，退出 0 |
-| `node scripts/verify-tag.mjs v1.1` | 同上，47 tests 全跑，**本章验证命令 4/4**，退出 0 |
-| 对不存在的 tag 跑同一脚本 | 退出 1，不静默通过 |
-| 对**没配本章检查**的 tag 跑 | 退出 1，打印「加一章就要在 CHAPTER_CHECKS 里补一条」 |
-| 把 v1.0 的一条检查期望改错 | 只挂那一条，`1/5 条没过`，其余 4 条照常通过 |
-| 开发库 `apps/api/data/app.db` | 测试全程不碰（用 mkdtemp 临时库） |
-| 手册 `npm run build` | 退出 0 |
-| 手册 `npm run check:links` | 21 页 559 条站内链接（含 54 个锚点）全部有效 |
-| 三页新文章节 | 200；桌面 1280px 与窄屏 874px 两档都正常；控制台 0 错误 |
-| 计划性/自标榜字样 | 三页均为 0（待写/待补/还没写/我们只讲/TODO/占位） |
-
-## 变异测试记录
-
-| 改坏的地方 | 挂掉的用例 |
-| --- | --- |
-| 去掉 DELETE 里的外键 409 翻译 | 1 条：删一个已经被订单引用的商品，返回 409 而不是 500 |
-| `rowToProduct` 里 `price_cents` 除以 100 | 3 条：三件 8.2 元的商品，用分算是精确的 2460 / 合法输入返回 201，并带上数据库自动发的 id / 以分存的整数读回来还是整数，不会变成小数 |
-| 关掉迁移的 checksum 校验 | 2 条：版本号在、内容不同，抛 MigrationError / 停下的时候，后面的迁移一个都不会跑 |
-
-**前两条抓到的用例没有重叠**，说明它们守的是不同行为。
-
 ## 本机实跑确认的事实（写文档直接用，别再自己猜）
+
+> 每条都附了**实跑出来的命令和实际输出**。要复现就复制命令跑一遍。
+>
+> 上一版这里只给结论不给命令，违反了本文档自己的规矩（见「硬约束」最后几条），
+> 结果下一个会话得重新推导一遍才能确认。
 
 > 本节每一条都附了**本会话跑出来的命令和实际输出**。要复现就直接复制命令跑一遍。
 > 上一版这里只给结论不给命令，违反了本文档自己的规矩（见「硬约束」最后两条），
@@ -395,50 +403,3 @@ Node.js v24.16.0
 
 ch04 的计划里原本预测的是「请求挂住直到超时」。**实跑推翻了这个预测**，已按实跑结果写进文档。教训：隐性规则这一类，**不跑就没有准确描述**。
 
-## 载体状态
-
-```
-apps/api/src/db/index.ts       Db 接口（query / one / transaction 三个方法）
-apps/api/src/db/sqlite.ts     node:sqlite 实现 + createDb 工厂 + 模块顶层 await migrate
-apps/api/src/db/migrate.ts    迁移执行器（版本表 + checksum + 每迁移一事务）
-apps/api/src/db/migrations/   001_init.ts、002_add_product_description.ts
-apps/api/src/routes/          products.ts、async-handler.ts
-apps/api/test/                harness.ts + 5 个测试文件
-```
-
-四张表 `users` / `products` / `orders` / `order_items` 已建，外键已生效。
-订单状态机用 `CHECK` 钉住了取值域（`pending` `paid` `shipped` `completed` `cancelled`），
-**转移规则还没实现**——那是 ch07 的事。
-
-`errors.ts` 已有 `constraintKind()` / `isConstraint()`，能把 SQLite 扩展错误码
-翻译成 `PRODUCT_IN_USE` / `PRODUCT_SKU_TAKEN` / `CONSTRAINT_VIOLATION`。
-
-## 下一步：S3 做 ch06 + ch07
-
-ch06 零停机变更（expand-contract），ch07 事务边界。
-
-ch06 已经铺好的伏笔：002 迁移里写了 `ADD COLUMN NOT NULL` 无默认值在有行表上会失败。
-这一章要讲的是**加列容易、删列和改类型难**，以及为什么老代码和新代码要能在同一段时间里
-同时对着一个库跑。
-
-ch07 建订单要同时动三张表（`orders` / `order_items` / `products.stock`），
-中途失败会留下不一致。`Db.transaction` 已经在 `sqlite.ts` 里实现好了，直接用。
-
-## 硬约束
-
-改动之前先看这几条，它们不随会话变化：
-
-- zod 钉 `~3.25.76`，不升 v4
-- 端口 3002，不复用 3001
-- `config.ts` 只放代码真的读到的键
-- 数据访问层不按实体建 repository
-- 文档不写「待写 / 待补 / 还没写」，不写「我们只讲 X 不讲 Y」这类句子
-- 文档里的每条命令标明是否改动数据
-- `::: request` 容器里的响应必须实跑抓取，不能凭印象写
-- **文档里举的每个例子都要实跑确认过**。会错和不会错的例子要分开写清楚，
-  随手挑数字是这一组已经犯过的错
-- **交接文档里的行为断言要带本会话跑出来的命令和输出**。S1 留下的
-  「SQLite 默认关着外键」没人跑过，害得 ch04 差点立论不成立
-- 每章收尾做变异测试，把挂掉的用例名写进 commit message
-- 加测试文件后要改根 `package.json` 的 `test` 脚本（显式列文件名），
-  并确认 `npm test` 的**测试条数涨了**。没涨就是没跑到
