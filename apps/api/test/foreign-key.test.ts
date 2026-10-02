@@ -66,7 +66,7 @@ describe('外键冲突翻译成接口语义', () => {
     assert.equal(body.error.code, 'PRODUCT_IN_USE')
   })
 
-  test('409 的响应体里没有 SQLite 的内部错误文本', async () => {
+  test('409 的响应体里没有数据库的内部错误文本', async () => {
     const product = await createProduct(h.baseUrl, { name: '有订单的商品' })
     const userId = await seedUser()
     const orderId = await seedOrder(userId)
@@ -75,11 +75,12 @@ describe('外键冲突翻译成接口语义', () => {
     const { body } = await call(h.baseUrl, `/api/products/${product.id}`, { method: 'DELETE' })
     const text = JSON.stringify(body)
 
-    // 「FOREIGN KEY」「SQLITE」「constraint failed」这些东西是给服务端看的。
-    // 漏出去等于把内部实现变成了接口契约，以后换库就得改前端。
+    // PostgreSQL 的外键报错原文是 violates foreign key constraint，
+    // 里面带着表名和列名。这些是给服务端看的。
+    // 漏出去等于把内部实现变成了接口契约，以后再换东西就得改前端。
     assert.ok(!/FOREIGN KEY/i.test(text), `响应体漏出了外键错误原文：${text}`)
-    assert.ok(!/SQLITE/i.test(text), `响应体漏出了 SQLite 字样：${text}`)
-    assert.ok(!/constraint failed/i.test(text), `响应体漏出了约束错误原文：${text}`)
+    assert.ok(!/constraint/i.test(text), `响应体漏出了约束错误原文：${text}`)
+    assert.ok(!/order_items|products/i.test(text), `响应体漏出了表名：${text}`)
   })
 
   test('商品还在，删除失败没有把数据改掉', async () => {
@@ -124,10 +125,15 @@ describe('外键约束真的在数据库里', () => {
   })
 
   test('默认连接下库里没有孤儿行', async () => {
-    // 这条是给「关掉外键」那套做法留的对照：node:sqlite 默认开着外键，
-    // 所以孤儿行本该是 0。要是这里不是 0，说明有人把 pragma 关了。
+    // **PostgreSQL 永远强制外键**，没有 SQLite 那个 `PRAGMA foreign_keys`
+    // 可以关。所以这条断言比 SQLite 那边更硬：孤儿行不是「默认没有」，
+    // 是「写不进去」。
+    //
+    // COUNT(*) 在 PostgreSQL 里是 bigint，pg 默认把它读成**字符串**，
+    // 所以这里要 ::int 转一下才是数字。要看那条规则的全貌，
+    // 见 pg-types.test.ts。
     const rows = await h.db.query<{ n: number }>(
-      `SELECT COUNT(*) AS n
+      `SELECT COUNT(*)::int AS n
          FROM order_items oi
          LEFT JOIN products p ON p.id = oi.product_id
         WHERE p.id IS NULL`,

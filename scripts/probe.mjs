@@ -24,14 +24,18 @@
  *   node scripts/probe.mjs nested     嵌套 BEGIN
  *   node scripts/probe.mjs check      CHECK 只管值域，不管转移
  *   node scripts/probe.mjs state      只读地打出四张表现在长什么样
+ *
+ * ## 换库之后它为什么还留着
+ *
+ * 前四个实验讲的是 SQLite 时期的事实，它们**不再描述当前代码**——
+ * `db/sqlite.ts` 已经删了，事务那道门也没有了。
+ * 留着它们是因为要复现换库之前的状态：`git checkout v1.3` 再跑一遍，
+ * 看到的就是当时读者会看到的东西。
+ *
+ * 只有 `state` 还接得上现在的代码，它已经改成读 PostgreSQL 了。
  */
 
 import { DatabaseSync } from 'node:sqlite'
-import * as nodeFs from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-const here = dirname(fileURLToPath(import.meta.url))
 
 /* ------------------------------------------------------------------ *
  * 取值
@@ -299,55 +303,80 @@ function check() {
  * 「查库确认」这一步不能靠猜。
  *
  * 本机不一定装了 sqlite3 命令行，所以这里给一条能直接复制的：
- * 它只读开发库（默认 apps/api/data/app.db），不写任何东西。
- * 想看别的库就带 DB_PATH。
+ * 它**只读**开发库（DATABASE_URL 指的那个），不写任何东西。
+ * 想看别的库就带 DATABASE_URL。
  *
- * @returns {void}
+ * @returns {Promise<void>}
  */
-function state() {
-  const file = process.env.DB_PATH ?? join(here, '..', 'apps', 'api', 'data', 'app.db')
-  if (!nodeFs.existsSync(file)) {
-    console.log(`还没有这个库：${file}`)
-    console.log('先 npm run dev:api 跑一次，它会自动建库并跑迁移。')
+async function state() {
+  const { Client } = await import('pg')
+  const url = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/orders'
+  const client = new Client({ connectionString: url })
+
+  try {
+    await client.connect()
+  } catch (err) {
+    console.log(`连不上数据库：${url}`)
+    console.log('先 docker compose up -d。')
+    console.log(`  ${err instanceof Error ? err.message : String(err)}`)
     return
   }
 
-  const d = new DatabaseSync(file, { readOnly: true })
-  const tables = ['users', 'products', 'orders', 'order_items']
+  try {
+    /** @type {string[]} */
+    const tables = ['users', 'products', 'orders', 'order_items']
 
-  /**
-   * @param {string} t
-   * @returns {number}
-   */
-  const count = (t) => num(d.prepare(`SELECT COUNT(*) AS n FROM ${t}`).get(), 'n')
+    console.log(`库：${url}`)
 
-  console.log(`库：${file}`)
-  console.log(`表：${tables.map((t) => `${t} ${count(t)} 行`).join('，')}`)
-  console.log('')
-  console.log('--- products ---')
-  for (const p of d.prepare('SELECT id, sku, title, price_cents, stock FROM products ORDER BY id').all()) {
-    console.log(`  #${text(p, 'id')} ${text(p, 'sku')} ${text(p, 'title')} ${text(p, 'price_cents')}分 库存 ${text(p, 'stock')}`)
+    /**
+     * @param {string} t
+     * @returns {Promise<number>}
+     */
+    const count = async (t) => {
+      const res = await client.query(`SELECT COUNT(*)::int AS n FROM ${t}`)
+      return res.rows[0].n
+    }
+
+    const parts = []
+    for (const t of tables) parts.push(`${t} ${await count(t)} 行`)
+    console.log(`表：${parts.join('，')}`)
+
+    console.log('')
+    console.log('--- products ---')
+    const products = await client.query(
+      'SELECT id, sku, title, price_cents, stock FROM products ORDER BY id',
+    )
+    for (const p of products.rows) {
+      console.log(
+        `  #${p.id} ${p.sku} ${p.title} ${p.price_cents}分 库存 ${p.stock}`,
+      )
+    }
+
+    console.log('--- orders ---')
+    const orders = await client.query('SELECT id, user_id, status, total_cents FROM orders ORDER BY id')
+    for (const o of orders.rows) {
+      console.log(`  #${o.id} 用户 ${o.user_id} ${o.status} ${o.total_cents}分`)
+    }
+
+    console.log('--- order_items ---')
+    const items = await client.query('SELECT id, order_id, product_id, quantity FROM order_items ORDER BY id')
+    for (const i of items.rows) {
+      console.log(`  订单 ${i.order_id} ← 商品 ${i.product_id} × ${i.quantity}`)
+    }
+  } finally {
+    await client.end()
   }
-  console.log('--- orders ---')
-  for (const o of d.prepare('SELECT id, user_id, status, total_cents FROM orders ORDER BY id').all()) {
-    console.log(`  #${text(o, 'id')} 用户 ${text(o, 'user_id')} ${text(o, 'status')} ${text(o, 'total_cents')}分`)
-  }
-  console.log('--- order_items ---')
-  for (const i of d.prepare('SELECT id, order_id, product_id, quantity FROM order_items ORDER BY id').all()) {
-    console.log(`  订单 ${text(i, 'order_id')} ← 商品 ${text(i, 'product_id')} × ${text(i, 'quantity')}`)
-  }
-  d.close()
 }
 
 /* ------------------------------------------------------------------ */
 
-/** @type {Record<string, () => void>} */
+/** @type {Record<string, () => void | Promise<void>>} */
 const ALL = { notx, rollback, nested, check, state }
 
 /**
- * @param {Record<string, () => void>} all
+ * @param {Record<string, () => void | Promise<void>>} all
  * @param {string} name
- * @returns {() => void}
+ * @returns {() => void | Promise<void>}
  */
 function pick(all, name) {
   const fn = all[name]
@@ -361,6 +390,6 @@ function pick(all, name) {
 
 const which = process.argv[2]
 for (const fn of which === undefined ? Object.values(ALL) : [pick(ALL, which)]) {
-  fn()
+  await fn()
   console.log('')
 }

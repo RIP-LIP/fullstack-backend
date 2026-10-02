@@ -1,8 +1,11 @@
 import { createHash } from 'node:crypto'
 import type { Db } from './index.ts'
-import { m001 } from './migrations/001_init.ts'
-import { m002 } from './migrations/002_add_product_description.ts'
-import { m003 } from './migrations/003_add_product_title.ts'
+
+export type Migration = {
+  version: number
+  name: string
+  up: (db: Db) => Promise<void>
+}
 
 /**
  * 迁移执行器。
@@ -13,20 +16,17 @@ import { m003 } from './migrations/003_add_product_title.ts'
  *
  * 解决办法是给数据库也记一份版本：改了什么、什么时候改的、当时那版
  * 长什么样（checksum）。启动时对一遍，只补没做过的。
- */
-
-export type Migration = {
-  version: number
-  name: string
-  up: (db: Db) => Promise<void>
-}
-
-/**
- * 迁移出错专用。
  *
- * 单独一个类型，是为了让上层能把「迁移失败」和「业务代码抛错」分开处理：
- * 前者必须让进程退出，不要带伤继续跑；后者是该返回 500 的那种。
+ * ## 这个文件不认识任何一套具体的迁移
+ *
+ * 迁移列表是**参数**，不是这里的常量。两个原因：
+ *
+ * 1. 换库之后有两套迁移（`migrations/sqlite/` 是冻结的历史，
+ *    `migrations/pg/` 是现在这套），由驱动各自传进来。
+ * 2. 测试要传一个「只包含 001」的列表，模拟「库里只有 001」这种场景。
+ *    默认值会让「忘了传」和「故意传全」长得一模一样。
  */
+
 export class MigrationError extends Error {
   constructor(message: string) {
     super(message)
@@ -36,10 +36,10 @@ export class MigrationError extends Error {
 
 const CREATE_MIGRATIONS_TABLE = `
   CREATE TABLE IF NOT EXISTS schema_migrations (
-    version    INTEGER PRIMARY KEY,
-    name       TEXT    NOT NULL,
-    checksum   TEXT    NOT NULL,
-    applied_at TEXT    NOT NULL
+    version    INTEGER     PRIMARY KEY,
+    name       TEXT        NOT NULL,
+    checksum   TEXT        NOT NULL,
+    applied_at TIMESTAMPTZ NOT NULL
   )
 `
 
@@ -54,18 +54,14 @@ export function checksumOf(migration: Migration): string {
   return createHash('sha256').update(migration.up.toString()).digest('hex')
 }
 
-/** 全部迁移，按版本号排好。显式列出，不去扫目录。 */
-export const allMigrations: readonly Migration[] = [m001, m002, m003]
-
 /**
  * 跑到最新版本，返回这次实际执行了哪些版本号。
  *
  * 三条规则，都是有意选的行为，不是默认行为：
  *
- * 1. 每个迁移在**自己的事务**里跑。DDL 在 SQLite 里是事务性的（实测：
- *    事务里建的表，ROLLBACK 之后就没了），所以半路失败不会留下「建了一半的表」。
- *    整批迁移套一个大事务更省事，但那样一个失败就全白做，
- *    而且大库上长时间持锁的代价很高。
+ * 1. 每个迁移在**自己的事务**里跑。DDL 在 PostgreSQL 里是事务性的，
+ *    所以半路失败不会留下「建了一半的表」。整批迁移套一个大事务更省事，
+ *    但那样一个失败就全白做，而且大库上长时间持锁的代价很高。
  *
  * 2. checksum 对不上就**抛错停下**，不自动重跑也不自动跳过。已经应用过的
  *    迁移被改过，说明有人在动历史。这时最糟的做法是「聪明地」猜——
@@ -74,8 +70,11 @@ export const allMigrations: readonly Migration[] = [m001, m002, m003]
  *
  * 3. 版本必须连续递增且不重复。中间空一个号说明有人漏提交了一个迁移，
  *    按序执行会直接把库带到错误的版本。
+ *
+ * **版本号从 1 连续，是每一套迁移内部的事。** PostgreSQL 那套从 1 重新开始，
+ * 因为它是一个新库的新历史，和 SQLite 那套没有关系。
  */
-export async function migrate(db: Db, migrations: readonly Migration[] = allMigrations): Promise<number[]> {
+export async function migrate(db: Db, migrations: readonly Migration[]): Promise<number[]> {
   await db.query(CREATE_MIGRATIONS_TABLE)
 
   const sorted = [...migrations].sort((a, b) => a.version - b.version)

@@ -20,7 +20,7 @@ let userId: number
 
 before(async () => {
   h = await startHarness()
-  userId = createUser(h.rawDb)
+  userId = await createUser(h.db)
 })
 
 after(async () => {
@@ -53,9 +53,17 @@ function transition(id: number, to: string): Promise<Response> {
 }
 
 /** 查某个商品的库存 */
-function stockOf(productId: number): number {
-  const row = h.rawDb.prepare('SELECT stock FROM products WHERE id = ?').get(productId) as { stock: number }
+async function stockOf(productId: number): Promise<number> {
+  const row = await h.db.one<{ stock: number }>('SELECT stock FROM products WHERE id = ?', [productId])
+  assert.ok(row !== undefined, `商品 ${productId} 不存在`)
   return row.stock
+}
+
+/** 某张表有几行。COUNT(*) 是 bigint，pg 默认读成字符串，所以 ::int 转一下。 */
+async function countOf(sql: string, ...params: unknown[]): Promise<number> {
+  const row = await h.db.one<{ n: number }>(sql, params as never[])
+  assert.ok(row !== undefined, `查不到行：${sql}`)
+  return row.n
 }
 
 test('建订单：一次请求改三张表，金额是整数分', async () => {
@@ -80,12 +88,13 @@ test('建订单：一次请求改三张表，金额是整数分', async () => {
   assert.equal(order.items.length, 2)
 
   // 三张表都要真的变了
-  assert.equal(stockOf(a.id), 8, 'a 的库存应该被扣掉 2')
-  assert.equal(stockOf(b.id), 7, 'b 的库存应该被扣掉 3')
-  const itemCount = h.rawDb
-    .prepare('SELECT COUNT(*) AS n FROM order_items WHERE order_id = ?')
-    .get(order.id) as { n: number }
-  assert.equal(itemCount.n, 2, '明细表要有两行')
+  assert.equal(await stockOf(a.id), 8, 'a 的库存应该被扣掉 2')
+  assert.equal(await stockOf(b.id), 7, 'b 的库存应该被扣掉 3')
+  const itemCount = await countOf(
+    'SELECT COUNT(*)::int AS n FROM order_items WHERE order_id = ?',
+    order.id,
+  )
+  assert.equal(itemCount, 2, '明细表要有两行')
 })
 
 test('明细里的价格是快照，商品改价不影响已有订单', async () => {
@@ -96,7 +105,7 @@ test('明细里的价格是快照，商品改价不影响已有订单', async ()
   assert.equal(order.totalCents, 1000)
 
   // 把商品价格翻三倍
-  h.rawDb.prepare('UPDATE products SET price_cents = 3000 WHERE id = ?').run(p.id)
+  await h.db.query('UPDATE products SET price_cents = 3000 WHERE id = ?', [p.id])
 
   const again = await fetch(`${h.baseUrl}/api/orders/${order.id}`)
   const reread = (await again.json()) as OrderBody
@@ -123,18 +132,18 @@ test('库存不足返回 409 OUT_OF_STOCK', async () => {
 test('库存不足时三张表都不变：没有订单、没有明细、库存没扣', async () => {
   const p = await createProduct(h.baseUrl, { priceCents: 500, stock: 2 })
   const before = {
-    orders: (h.rawDb.prepare('SELECT COUNT(*) AS n FROM orders').get() as { n: number }).n,
-    items: (h.rawDb.prepare('SELECT COUNT(*) AS n FROM order_items').get() as { n: number }).n,
-    stock: stockOf(p.id),
+    orders: await countOf('SELECT COUNT(*)::int AS n FROM orders'),
+    items: await countOf('SELECT COUNT(*)::int AS n FROM order_items'),
+    stock: await stockOf(p.id),
   }
 
   const res = await postOrder({ userId, items: [{ productId: p.id, quantity: 99 }] })
   assert.equal(res.status, 409)
 
   const after = {
-    orders: (h.rawDb.prepare('SELECT COUNT(*) AS n FROM orders').get() as { n: number }).n,
-    items: (h.rawDb.prepare('SELECT COUNT(*) AS n FROM order_items').get() as { n: number }).n,
-    stock: stockOf(p.id),
+    orders: await countOf('SELECT COUNT(*)::int AS n FROM orders'),
+    items: await countOf('SELECT COUNT(*)::int AS n FROM order_items'),
+    stock: await stockOf(p.id),
   }
   assert.deepEqual(after, before, '回滚之后三张表必须和调用前完全一样')
 })
@@ -142,7 +151,7 @@ test('库存不足时三张表都不变：没有订单、没有明细、库存�
 test('第二个商品库存不足时，第一个商品的扣减也要退回去', async () => {
   const a = await createProduct(h.baseUrl, { priceCents: 100, stock: 10 })
   const b = await createProduct(h.baseUrl, { priceCents: 100, stock: 1 })
-  const stockBefore = stockOf(a.id)
+  const stockBefore = await stockOf(a.id)
 
   const res = await postOrder({
     userId,
@@ -154,7 +163,7 @@ test('第二个商品库存不足时，第一个商品的扣减也要退回去',
   assert.equal(res.status, 409)
 
   // 关键：a 的扣减必须已经退回去。这是「整体回滚」和「只回滚失败那一步」的分界线。
-  assert.equal(stockOf(a.id), stockBefore, '第一个商品的库存扣减必须被回滚')
+  assert.equal(await stockOf(a.id), stockBefore, '第一个商品的库存扣减必须被回滚')
 })
 
 test('商品不存在返回 404 PRODUCT_NOT_FOUND', async () => {

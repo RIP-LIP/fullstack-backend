@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { CreateOrderInput, TransitionInput } from '@fullstack/shared'
 import type { Order, OrderItem, OrderStatus } from '@fullstack/shared'
-import { db } from '../db/sqlite.ts'
+import { db } from '../db/postgres.ts'
 import { HttpError } from '../errors.ts'
 import { asyncHandler } from './async-handler.ts'
 import { allowedFrom, canTransition } from '../order-state.ts'

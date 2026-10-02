@@ -21,6 +21,18 @@
 /** 能绑进 SQL 占位符的值。和 node:sqlite 的支持范围一致。 */
 export type Param = string | number | bigint | null | Uint8Array
 
+/**
+ * 底层是哪个数据库。
+ *
+ * 业务代码**不分支**——它只见 `Db` 这个接口。
+ * 只有两类地方看这个值：`scripts/` 里那些要直接连库的工具，
+ * 和测试里那些需要知道「PRAGMA 还是 information_schema」的断言。
+ *
+ * 之所以还要留这个类型：换库之后 SQLite 那边并没有从历史里消失，
+ * `verify-tag` 要能复现 v1.0 到 v1.3，它得知道自己该用哪一套工具。
+ */
+export type Dialect = 'sqlite' | 'postgres'
+
 export interface Db {
   /** 返回多行。查不到就是空数组。写入语句用 RETURNING，靠它拿回新行。 */
   query<T>(sql: string, params?: readonly Param[]): Promise<T[]>

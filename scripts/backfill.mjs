@@ -10,23 +10,33 @@
  * 用法：
  *   node scripts/backfill.mjs                 # 一批一批跑到补完
  *   node scripts/backfill.mjs --batch=20      # 每批 20 行
- *   node scripts/backfill.mjs --batch=5       # 每批 5 行，中途 Ctrl+C 也不会坏
  *   node scripts/backfill.mjs --status        # 只看还剩多少，不改数据
  *
  * 刻意不提供「一次性 UPDATE 全表」这个选项。真实项目里那一行 SQL
  * 会锁表锁到语句结束，几百万行就是几分钟到几十分钟，期间所有写请求排队。
  * 这里的批大小是给教学用的，生产上按行宽和单行耗时调。
+ *
+ * ## 换库之后它还在，为什么
+ *
+ * PostgreSQL 那边是**一份基线**，建表时 title 就在，老数据一行都没有。
+ * 所以这个脚本在换库之后跑起来会报「已经补完了」——那是正确的空操作，
+ * 不是坏了。
+ *
+ * 留着它是因为两件事：
+ * 1. ch06 那篇还在让读者跑它，删了文档就断了。
+ * 2. **进度守卫这件事本身没有过期。** 它对任何批处理脚本都成立，
+ *    而它是这个脚本唯一一条换库之后还完全成立的经验。
+ *
+ * 换库丢掉的是 SQLite 特有的那条：`db.exec()` 不接受绑定参数，
+ * `?` 被当字面量，语句成功、0 行受影响、循环空转。
+ * PostgreSQL 的 `client.query(text, values)` 总是接受参数，所以那条坑不存在了。
+ * 换成另一条要小心的：**一批 ids 拼出来的 IN 列表要用真正的参数，
+ * 不能拼进 SQL 字符串**。见下面 placeholdersFor 那个函数。
  */
 
-import { DatabaseSync } from 'node:sqlite'
-import { existsSync } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { Client } from 'pg'
 
-const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
-const dbPath = process.env.DB_PATH
-  ? resolve(process.env.DB_PATH)
-  : join(repoRoot, 'apps', 'api', 'data', 'app.db')
+const URL = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/orders'
 
 const args = process.argv.slice(2)
 const batchArg = args.find((a) => a.startsWith('--batch='))
@@ -38,92 +48,117 @@ if (!Number.isInteger(BATCH) || BATCH < 1) {
   process.exit(1)
 }
 
-if (!existsSync(dbPath)) {
-  console.error(`找不到数据库：${dbPath}\n先起一次后端，让迁移把表建出来。`)
+/**
+ * 生成 n 个占位符：3 -> '$1,$2,$3'
+ *
+ * **不要把 id 拼进 SQL 字符串。** 那样做的话，
+ * 一批数据的来源只要有一天不完全受控，它就是一条注入路径。
+ * 这里 id 全都是刚查出来的整数，但「刚查出来的」不是安全保证。
+ *
+ * @param {number} n
+ * @returns {string}
+ */
+function placeholdersFor(n) {
+  return Array.from({ length: n }, (_, i) => `$${i + 1}`).join(',')
+}
+
+/**
+ * @param {Client} client
+ * @returns {Promise<number>}
+ */
+async function remaining(client) {
+  const res = await client.query('SELECT COUNT(*)::int AS n FROM products WHERE title IS NULL')
+  return res.rows[0].n
+}
+
+const client = new Client({ connectionString: URL })
+try {
+  await client.connect()
+} catch (err) {
+  console.error(`连不上数据库：${URL}`)
+  console.error('先 docker compose up -d。')
+  console.error(err instanceof Error ? err.message : String(err))
   process.exit(1)
 }
 
-const db = new DatabaseSync(dbPath, { readOnly: STATUS_ONLY })
-
-// 回填之前先确认目标列在。不在的话说明 003 迁移没跑，
-// 直接 UPDATE 会报 no such column，而那行报错不好看出是「顺序错了」。
-if (!STATUS_ONLY) {
-  const cols = db.prepare('PRAGMA table_info(products)').all().map((r) => r.name)
-  if (!cols.includes('title')) {
-    console.error('products 表里没有 title 列。003 迁移没跑？先起一次后端。')
-    console.error(`实际列：${JSON.stringify(cols)}`)
-    db.close()
-    process.exit(1)
-  }
+// 回填之前先确认目标列在。不在的话说明基线没跑，
+// 直接 UPDATE 会报 column does not exist，而那行报错不好看出是「顺序错了」。
+const cols = await client.query(
+  "SELECT column_name FROM information_schema.columns WHERE table_name = 'products'",
+)
+const names = cols.rows.map((r) => r.column_name)
+if (!names.includes('title')) {
+  console.error('products 表里没有 title 列。先起一次后端让迁移跑完。')
+  console.error(`实际列：${JSON.stringify(names)}`)
+  await client.end()
+  process.exit(1)
 }
 
-const remaining = () => Number(db.prepare('SELECT COUNT(*) AS n FROM products WHERE title IS NULL').get()?.n ?? 0)
-
-let total = remaining()
-console.log(`数据库：${dbPath}`)
+let total = await remaining(client)
+console.log(`数据库：${URL}`)
 console.log(`每批：${BATCH} 行`)
 console.log(`待回填：${total} 行`)
 
 if (STATUS_ONLY) {
   console.log(total === 0 ? '\n已经补完了。' : '\n还没补完，跑一次 node scripts/backfill.mjs')
-  db.close()
+  await client.end()
   process.exit(0)
 }
 
 let batch = 0
 while (total > 0) {
-  batch++
+  batch += 1
 
   // 一批一个事务。挂了只丢这一批，补过的行不受影响。
-  db.exec('BEGIN')
+  await client.query('BEGIN')
   try {
-    const ids = db
-      .prepare('SELECT id FROM products WHERE title IS NULL ORDER BY id LIMIT ?')
-      .all(BATCH)
-      .map((r) => r.id)
+    const picked = await client.query(
+      'SELECT id FROM products WHERE title IS NULL ORDER BY id LIMIT $1',
+      [BATCH],
+    )
+    const ids = picked.rows.map((r) => r.id)
 
     if (ids.length === 0) {
-      db.exec('COMMIT')
+      await client.query('COMMIT')
       break
     }
 
-    // **必须用 prepare().run(...ids)，不能用 db.exec()。**
-    // exec() 不接受绑定参数，`?` 会被当成字面量：语句能跑通，
-    // 但 `id IN (NULL, NULL, NULL)` 匹配不到任何行，0 行受影响。
-    // 症状是「每批都处理 10 行，还剩 23 行」——不动，还一直转。
-    const placeholders = ids.map(() => '?').join(',')
-    const result = db
-      .prepare(`UPDATE products SET title = name WHERE title IS NULL AND id IN (${placeholders})`)
-      .run(...ids.map((id) => Number(id)))
+    const result = await client.query(
+      `UPDATE products SET title = name
+        WHERE title IS NULL AND id IN (${placeholdersFor(ids.length)})`,
+      ids,
+    )
 
-    db.exec('COMMIT')
+    await client.query('COMMIT')
 
     // **进度守卫：处理了行，但剩余数没降，就停下来报错。**
     // 批处理脚本最危险的失败不是报错，是「不报错也不推进」——
     // while 的条件一直成立，循环永远转下去，日志刷几千行也没人知道。
     // 所以每次批完都核对一次真的少了行，没少就当失败处理。
-    const after = remaining()
+    const after = await remaining(client)
     if (after >= total) {
-      console.error(`  第 ${batch} 批：语句报告改了 ${result.changes} 行，但待回填数仍是 ${total}，没有推进。`)
+      console.error(
+        `  第 ${batch} 批：语句报告改了 ${result.rowCount} 行，但待回填数仍是 ${total}，没有推进。`,
+      )
       console.error('  停下来，不继续空转。')
-      db.close()
+      await client.end()
       process.exit(1)
     }
 
     total = after
-    const done = db.prepare('SELECT COUNT(*) AS n FROM products WHERE title IS NOT NULL').get()?.n ?? 0
-    console.log(`  第 ${batch} 批：处理 ${ids.length} 行，累计已补 ${Number(done)} 行，还剩 ${total} 行`)
+    const done = await client.query('SELECT COUNT(*)::int AS n FROM products WHERE title IS NOT NULL')
+    console.log(`  第 ${batch} 批：处理 ${ids.length} 行，累计已补 ${done.rows[0].n} 行，还剩 ${total} 行`)
   } catch (err) {
-    db.exec('ROLLBACK')
+    await client.query('ROLLBACK').catch(() => {})
     console.error(`  第 ${batch} 批失败，已回滚：${err instanceof Error ? err.message : String(err)}`)
     console.error('  补过的行还在，直接重跑就行，不用从头来。')
-    db.close()
+    await client.end()
     process.exit(1)
   }
 }
 
-const stillLeft = remaining()
-db.close()
+const stillLeft = await remaining(client)
+await client.end()
 
 console.log(`\n回填完成，共 ${batch} 批。`)
 console.log(`复检 title IS NULL 的行数：${stillLeft}`)

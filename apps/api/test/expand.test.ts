@@ -2,6 +2,7 @@ import { test, describe, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import type { Harness } from './harness.ts'
 import { startHarness, call, createProduct } from './harness.ts'
+import { columnsOf } from './test-db.ts'
 
 /**
  * ch06：把 products.name 换成 title 的 expand 阶段。
@@ -11,6 +12,9 @@ import { startHarness, call, createProduct } from './harness.ts'
  *   双读  读取时 title 有值用 title，没有退回 name
  *
  * 少任何一件，症状都不是「报错」，而是**响应里静默少一个字段**。
+ *
+ * 换库之后这个文件的写库方式变了：不再有原始连接，全部走 `h.db`。
+ * 「查不到行」在这里只能是查询写错了，所以让 one() 大声失败。
  */
 
 let h: Harness
@@ -27,14 +31,21 @@ type ProductBody = {
 type Row = Record<string, unknown>
 
 /**
- * node:sqlite 的 get() 类型上是 T | undefined。用它查一个刚写进去的行，
+ * 查一行，查不到就当场失败。
+ *
  * 拿不到只能是「查询写错了」，所以这里让它大声失败，
- * 而不是让后面每一行都变成 'row is possibly undefined'。
+ * 而不是让后面每一行都变成 row is possibly undefined。
  */
-function one(sql: string, ...params: unknown[]): Row {
-  const row = h.rawDb.prepare(sql).get(...(params as never[]))
+async function one(sql: string, ...params: unknown[]): Promise<Row> {
+  const row = await h.db.one<Row>(sql, params as never[])
   assert.ok(row !== undefined, `查不到行：${sql}`)
-  return row as Row
+  return row
+}
+
+/** 跑一条 UPDATE，返回受影响的行数 */
+async function runUpdate(sql: string, ...params: unknown[]): Promise<number> {
+  const rows = await h.db.query<{ id: number }>(`${sql} RETURNING id`, params as never[])
+  return rows.length
 }
 
 before(async () => {
@@ -45,9 +56,9 @@ after(async () => {
 })
 
 /** 直接往库里插一行「没有 title」的老数据，模拟回填之前的状态 */
-function insertLegacyProduct(sku: string, name: string): number {
+async function insertLegacyProduct(sku: string, name: string): Promise<number> {
   const now = new Date().toISOString()
-  const row = one(
+  const row = await one(
     'INSERT INTO products (sku, name, title, price_cents, stock, created_at) VALUES (?, ?, NULL, ?, ?, ?) RETURNING id',
     sku,
     name,
@@ -59,8 +70,8 @@ function insertLegacyProduct(sku: string, name: string): number {
 }
 
 describe('expand：加了一列，老数据没有值', () => {
-  test('003 迁移跑完，products 表确实多了一列 title', async () => {
-    const cols = h.rawDb.prepare('PRAGMA table_info(products)').all().map((r) => r.name as string)
+  test('products 表同时有 name 和 title 两列', async () => {
+    const cols = await columnsOf(h.db, 'products')
     assert.ok(cols.includes('title'), `列里没有 title：${JSON.stringify(cols)}`)
     // 老列还在。这一章不删任何东西，删是 contract 阶段的事
     assert.ok(cols.includes('name'), 'name 这一章不该被删')
@@ -69,7 +80,7 @@ describe('expand：加了一列，老数据没有值', () => {
   // 这是整章最关键的一条：老数据 title 是 NULL，双读兜底之后
   // title 必须等于 name，而不是消失。
   test('老数据（title 为 NULL）读出来的 title 退回 name', async () => {
-    const id = insertLegacyProduct('LEGACY-1', '老商品甲')
+    const id = await insertLegacyProduct('LEGACY-1', '老商品甲')
 
     const res = await fetch(`${h.baseUrl}/api/products/${id}`)
     assert.equal(res.status, 200)
@@ -82,7 +93,7 @@ describe('expand：加了一列，老数据没有值', () => {
   // 断言「键存在」，不只是「值对」。JSON.stringify 遇到 undefined
   // 会把键直接删掉，值断言用 === undefined 比反而抓不住这种情况。
   test('title 这个键一定在响应里，不会被 JSON.stringify 悄悄删掉', async () => {
-    const id = insertLegacyProduct('LEGACY-2', '老商品乙')
+    const id = await insertLegacyProduct('LEGACY-2', '老商品乙')
     const raw = await (await fetch(`${h.baseUrl}/api/products/${id}`)).text()
 
     assert.ok(raw.includes('"title"'), `响应里没有 title 这个键：${raw}`)
@@ -103,7 +114,7 @@ describe('双写', () => {
     assert.equal(created.name, '双写测试')
 
     // 落库确认，不只看响应
-    const row = one('SELECT name, title FROM products WHERE id = ?', created.id)
+    const row = await one('SELECT name, title FROM products WHERE id = ?', created.id)
     assert.equal(row.name, '双写测试')
     assert.equal(row.title, '双写测试')
   })
@@ -134,7 +145,7 @@ describe('双写', () => {
       })
     ).json()) as ProductBody
 
-    const row = one('SELECT name, title FROM products WHERE id = ?', created.id)
+    const row = await one('SELECT name, title FROM products WHERE id = ?', created.id)
     assert.equal(row.name, '老调用方的名字')
     assert.equal(row.title, '新调用方的标题')
   })
@@ -144,27 +155,26 @@ describe('回填的幂等性', () => {
   // 回填脚本的 WHERE 条件只看「title IS NULL」，所以跑两遍和跑一遍一样。
   // 这条守住的是脚本本身的性质，不是某一次执行的结果。
   test('把 title 手工补上之后，再跑一次不会覆盖已经补好的值', async () => {
-    const id = insertLegacyProduct('BF-1', '原始名字')
+    const id = await insertLegacyProduct('BF-1', '原始名字')
 
-    h.rawDb.prepare('UPDATE products SET title = ? WHERE id = ?').run('原始名字', id)
+    await runUpdate('UPDATE products SET title = ? WHERE id = ?', '原始名字', id)
     // 再跑一次回填的逻辑：只碰 title IS NULL 的行
-    const changed = h.rawDb
-      .prepare('UPDATE products SET title = name WHERE id = ? AND title IS NULL')
-      .run(id)
+    const changed = await runUpdate('UPDATE products SET title = name WHERE id = ? AND title IS NULL', id)
 
-    assert.equal(changed.changes, 0, '已经补过的行不该再被改动')
-    const row = one('SELECT title FROM products WHERE id = ?', id)
+    assert.equal(changed, 0, '已经补过的行不该再被改动')
+    const row = await one('SELECT title FROM products WHERE id = ?', id)
     assert.equal(row.title, '原始名字')
   })
 
   test('回填的 WHERE 条件只命中还没补的行', async () => {
-    const a = insertLegacyProduct('BF-2', '待补甲')
-    const b = insertLegacyProduct('BF-3', '待补乙')
-    h.rawDb.prepare('UPDATE products SET title = name WHERE id = ?').run(a)
+    const a = await insertLegacyProduct('BF-2', '待补甲')
+    const b = await insertLegacyProduct('BF-3', '待补乙')
+    await runUpdate('UPDATE products SET title = name WHERE id = ?', a)
 
-    const pending = one('SELECT COUNT(*) AS n FROM products WHERE title IS NULL')
+    // COUNT(*) 是 bigint，pg 默认读成字符串，所以 ::int 转一下
+    const pending = await one('SELECT COUNT(*)::int AS n FROM products WHERE title IS NULL')
     assert.ok((pending.n as number) >= 1, 'b 还没补，应该还在待补里')
-    const rowB = one('SELECT title FROM products WHERE id = ?', b)
+    const rowB = await one('SELECT title FROM products WHERE id = ?', b)
     assert.equal(rowB.title, null, 'b 确实还没补')
   })
 })
@@ -175,7 +185,7 @@ describe('老代码视角', () => {
   test('库上多了一列，老版本只读 name 的那条路径仍然通', async () => {
     const created = await createProduct(h.baseUrl, { sku: 'OLD-1', name: '老版本建的数据' })
 
-    const row = one('SELECT name, title FROM products WHERE id = ?', created.id)
+    const row = await one('SELECT name, title FROM products WHERE id = ?', created.id)
     assert.equal(row.name, '老版本建的数据')
     assert.equal(row.title, '老版本建的数据', '新版本写的时候顺带把 title 也落上了')
   })

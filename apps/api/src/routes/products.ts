@@ -1,7 +1,7 @@
 import { Router } from 'express'
 import { CreateProductInput } from '@fullstack/shared'
 import type { Product } from '@fullstack/shared'
-import { db } from '../db/sqlite.ts'
+import { db } from '../db/postgres.ts'
 import { HttpError, isConstraint } from '../errors.ts'
 import { asyncHandler } from './async-handler.ts'
 

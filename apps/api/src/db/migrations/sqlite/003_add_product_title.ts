@@ -1,5 +1,5 @@
-import type { Db } from '../index.ts'
-import type { Migration } from '../migrate.ts'
+import type { Db } from '../../index.ts'
+import type { Migration } from '../../migrate.ts'
 
 /**
  * 003：给 products 加一列 title。

@@ -9,6 +9,29 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # 换到 PostgreSQL 之后测试需要真的数据库。
+    # 镜像和 docker-compose.yml 里用的是同一个：17-alpine。
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: orders
+        ports:
+          - 5432:5432
+        # 没有这一步，测试会在「连不上」上失败，而那和代码对不对无关。
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      # 测试的 harness 会把库名后面加 _test_<进程号>，
+      # 所以这里指开发库就够了，测试自己会去建那个库。
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/orders
+
     strategy:
       fail-fast: false
       matrix:

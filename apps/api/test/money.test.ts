@@ -26,7 +26,7 @@ after(async () => {
 
 describe('浮点数存钱会错', () => {
   test('0.1 + 0.2 不等于 0.3', () => {
-    // 地基：不是 SQLite 的问题，是二进制浮点表示不了 0.1。
+    // 地基：不是数据库的问题，是二进制浮点表示不了 0.1。
     assert.equal(0.1 + 0.2 === 0.3, false)
     assert.equal(0.1 + 0.2, 0.30000000000000004)
   })
@@ -37,18 +37,39 @@ describe('浮点数存钱会错', () => {
     assert.equal(8.2 * 3, 24.599999999999998)
   })
 
-  test('SQLite 用 REAL 列算同一个总价，错的数会落进库里', () => {
-    // 换成 REAL 存钱，错的不是内存里的数，是**存下来的数**。
+  test('用 REAL 列存钱，错的数会落进库里', async () => {
+    // 换成浮点列存钱，错的不是内存里的数，是**存下来的数**。
     // 对账时你看到的就是一个说不清来由的 24.599999999999998。
-    h.rawDb.exec('CREATE TABLE money_demo_real (price REAL, qty INTEGER)')
-    h.rawDb.exec('INSERT INTO money_demo_real (price, qty) VALUES (8.2, 3)')
+    //
+    // PostgreSQL 的 `REAL` 是单精度 float4，比 float8 更粗，
+    // 所以这里错得比 SQLite 的 REAL 还明显——但本质是同一件事：
+    // 二进制浮点表示不了 8.2。
+    await h.db.query('CREATE TABLE money_demo_real (price REAL, qty INTEGER)')
+    await h.db.query('INSERT INTO money_demo_real (price, qty) VALUES (8.2, 3)')
 
-    const rows = h.rawDb
-      .prepare('SELECT price * qty AS total FROM money_demo_real')
-      .get() as { total: number } | undefined
+    const row = await h.db.one<{ total: number }>(
+      'SELECT price * qty AS total FROM money_demo_real',
+    )
 
-    assert.ok(rows !== undefined)
-    assert.equal(rows.total, 24.599999999999998)
+    assert.ok(row !== undefined)
+    assert.notEqual(row.total, 24.6, '浮点路径给不出精确的 24.6')
+  })
+
+  test('换成 NUMERIC 就精确了——所以「用浮点存钱」是列类型的选择，不是数据库的错', async () => {
+    // 同一个数据库，同一个算式，把列类型换成 NUMERIC 答案就对了。
+    // 这条留着是为了说明：问题出在选了什么类型，不是出在用了 PostgreSQL。
+    //
+    // NUMERIC 是不带精度的十进制，算出来是精确的。
+    // 注意它**不保留末尾的零**——要保留得写 NUMERIC(10,2)。
+    // 本项目用整数分，所以这两种写法都不需要。
+    await h.db.query('CREATE TABLE money_demo_numeric (price NUMERIC, qty INTEGER)')
+    await h.db.query('INSERT INTO money_demo_numeric (price, qty) VALUES (8.2, 3)')
+
+    const row = await h.db.one<{ total: string }>(
+      'SELECT price * qty AS total FROM money_demo_numeric',
+    )
+
+    assert.equal(row?.total, '24.6', 'NUMERIC 算出来是精确的十进制数')
   })
 
   test('用「元 × 100」换成分，这一步自己就会错', () => {

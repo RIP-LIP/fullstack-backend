@@ -4,22 +4,28 @@
  * 只放当前代码真的读到的键。放进来没人读，就是一份会腐烂的配置。
  */
 
-import { dirname, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
-
-const here = dirname(fileURLToPath(import.meta.url))
-
 /**
  * 端口用 3002，不是 3001。fullstack-todo-app 占着 3001，两个服务要能同时起。
  */
 export const PORT = Number(process.env.PORT ?? 3002)
 
 /**
- * 数据库文件位置。默认落在 apps/api/data/ 下，该目录不进版本库。
+ * PostgreSQL 连接串。
  *
- * 这个环境变量是给测试用的：测试指向 mkdtemp 出来的临时文件，
- * 所以跑测试不会碰到你开发库里已有的数据。不设就用默认位置。
+ * 默认值指向 `docker compose up -d` 起出来的那个容器。
+ * 换过端口或密码就传 DATABASE_URL 进来。
+ *
+ * **测试用的那个库名必须以 `_test` 结尾**，这是 `db/postgres.ts` 里的
+ * 安全闸会检查的东西：测试永远不该碰到开发库，而「靠记得别连错」
+ * 显然靠不住。
  */
-export const DB_PATH = process.env.DB_PATH
-  ? resolve(process.env.DB_PATH)
-  : resolve(here, '../data/app.db')
+export const DATABASE_URL =
+  process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/orders'
+
+/**
+ * 连接池大小，按「同时最多有几个请求在跑」定。
+ *
+ * 每一个连接都是一条到数据库的网络往返，机器有多少核跟它没关系，
+ * 所以别按 CPU 核数去设。10 对这个项目绰绰有余。
+ */
+export const PG_POOL_MAX = Number(process.env.PG_POOL_MAX ?? 10)

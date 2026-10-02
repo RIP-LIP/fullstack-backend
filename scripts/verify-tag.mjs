@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { DatabaseSync } from 'node:sqlite'
+import { Client } from 'pg'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
@@ -48,6 +49,55 @@ let workDir = ''
 let server = null
 /** 本章验证命令里没过的条目名，最后统一报 */
 const failedChecks = []
+
+/**
+ * 这个 tag 用哪个方言。
+ *
+ * v1.0 到 v1.3 是 SQLite，v1.4 起是 PostgreSQL。
+ *
+ * **这里必须按 tag 判，不能按当前代码判。** 换库之后 `db/sqlite.ts` 已经删了，
+ * 而 v1.0 到 v1.3 的代码里根本没有 PostgreSQL 相关的东西——
+ * 复现旧 tag 用的就是它当时的那份代码和那个数据库。
+ * 所以这个脚本自己得同时会两套工具。
+ *
+ * 规则写死在这里而不是「跑一下看报错」：写死了漏加会立刻看出来，
+ * 而靠报错的话，第一次遇到的是某个旧 tag 莫名其妙复现失败。
+ *
+ * @param {string} t
+ * @returns {'sqlite' | 'postgres'}
+ */
+function dialectFor(t) {
+  const m = /^v(\d+)\.(\d+)$/.exec(t)
+  if (m === null) return 'sqlite' // v0.0
+  const major = Number(m[1])
+  const minor = Number(m[2])
+  return major > 1 || (major === 1 && minor >= 4) ? 'postgres' : 'sqlite'
+}
+
+const DIALECT = dialectFor(tag)
+const PG_BASE_URL = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/orders'
+/** 这次复现专属的库名，跑完删掉。 */
+const PG_DB_NAME = `verify_${tag.replace(/\./g, '_')}`
+/** 这次复现给服务用的连接串。null 表示这次是 SQLite。 */
+/** @type {string | null} */
+let pgUrl = null
+/**
+ * 惰性开着的 PostgreSQL 连接，只给 verify-tag 自己查库用。
+ * @type {Client | null}
+ */
+let pgClient = null
+
+/**
+ * 把连接串里的库名换掉，其他部分原样保留。
+ * @param {string} connectionString
+ * @param {string} name
+ * @returns {string}
+ */
+function withDbName(connectionString, name) {
+  const url = new URL(connectionString)
+  url.pathname = `/${name}`
+  return url.toString()
+}
 
 /**
  * 每个 tag 的「本章验证命令」。
@@ -119,7 +169,7 @@ const CHAPTER_CHECKS = {
     {
       desc: '版本表里有两条记录（001 / 002）',
       run: async (_base, dir) => {
-        const rows = readDb(dir, 'SELECT version, name FROM schema_migrations ORDER BY version')
+        const rows = await readDb(dir, 'SELECT version, name FROM schema_migrations ORDER BY version')
         const got = rows.map((r) => `${r.version}/${r.name}`).join(',')
         const want = '1/init,2/add_product_description'
         if (got !== want) return `期望 ${want}，实际 ${got}`
@@ -129,7 +179,7 @@ const CHAPTER_CHECKS = {
     {
       desc: '002 迁移加的 description 列真的在表上',
       run: async (_base, dir) => {
-        const cols = readDb(dir, 'PRAGMA table_info(products)').map((r) => r.name)
+        const cols = await columnsOf(dir, 'products')
         if (!cols.includes('description')) return `列里没有 description，实际是 ${JSON.stringify(cols)}`
         return true
       },
@@ -161,7 +211,7 @@ const CHAPTER_CHECKS = {
     {
       desc: '003 迁移跑完，products 表上 title 和 name 两列都在',
       run: async (_base, dir) => {
-        const cols = readDb(dir, 'PRAGMA table_info(products)').map((r) => r.name)
+        const cols = await columnsOf(dir, 'products')
         if (!cols.includes('title')) return `没有 title 列：${JSON.stringify(cols)}`
         // 这一章不删任何东西。name 还在是 expand 阶段的标志
         if (!cols.includes('name')) return 'name 被删了，contract 阶段才该删'
@@ -171,7 +221,7 @@ const CHAPTER_CHECKS = {
     {
       desc: '老数据（title 为 NULL）读出来 title 退回 name，不是 null',
       run: async (base, dir) => {
-        const id = insertLegacyProduct(dir)
+        const id = await insertLegacyProduct(dir)
         const res = await get(`${base}/api/products/${id}`)
         if (res.status !== 200) return `期望 200，实际 ${res.status}`
         if (res.body?.title !== '老数据老名字') return `期望「老数据老名字」，实际 ${JSON.stringify(res.body?.title)}`
@@ -181,7 +231,7 @@ const CHAPTER_CHECKS = {
     {
       desc: '响应里 title 这个键一定在，不会被 JSON.stringify 悄悄删掉',
       run: async (base, dir) => {
-        const id = insertLegacyProduct(dir)
+        const id = await insertLegacyProduct(dir)
         const raw = await (await fetch(`${base}/api/products/${id}`)).text()
         if (!raw.includes('"title"')) return `响应里没有 title 这个键：${raw}`
         return true
@@ -217,7 +267,7 @@ const CHAPTER_CHECKS = {
     {
       desc: '建订单一次改三张表：订单、明细、库存都变了',
       run: async (base, dir) => {
-        const userId = seedUser(dir)
+        const userId = await seedUser(dir)
         const p1 = await post(`${base}/api/products`, { sku: `T7-A-${Date.now()}`, name: '甲', priceCents: 1999, stock: 10 })
         const p2 = await post(`${base}/api/products`, { sku: `T7-B-${Date.now()}`, name: '乙', priceCents: 2500, stock: 10 })
         if (p1.status !== 201 || p2.status !== 201) return `建商品失败：${p1.status} / ${p2.status}`
@@ -234,12 +284,12 @@ const CHAPTER_CHECKS = {
         if (res.body?.totalCents !== 11498) return `期望 totalCents=11498，实际 ${res.body?.totalCents}`
         if (!Number.isInteger(res.body?.totalCents)) return `totalCents 不是整数：${res.body?.totalCents}`
 
-        const stock1 = readDb(dir, `SELECT stock FROM products WHERE id = ${p1.body.id}`)[0]?.stock
-        const stock2 = readDb(dir, `SELECT stock FROM products WHERE id = ${p2.body.id}`)[0]?.stock
+        const stock1 = (await readDb(dir, `SELECT stock FROM products WHERE id = ${p1.body.id}`))[0]?.stock
+        const stock2 = (await readDb(dir, `SELECT stock FROM products WHERE id = ${p2.body.id}`))[0]?.stock
         if (stock1 !== 8) return `第一个商品库存期望 8，实际 ${stock1}`
         if (stock2 !== 7) return `第二个商品库存期望 7，实际 ${stock2}`
 
-        const items = readDb(dir, `SELECT COUNT(*) AS n FROM order_items WHERE order_id = ${res.body.id}`)[0]?.n
+        const items = (await readDb(dir, `SELECT COUNT(*) AS n FROM order_items WHERE order_id = ${res.body.id}`))[0]?.n
         if (items !== 2) return `明细期望 2 行，实际 ${items}`
         return true
       },
@@ -247,12 +297,12 @@ const CHAPTER_CHECKS = {
     {
       desc: '库存不足整体回滚：三张表和调用前完全一样',
       run: async (base, dir) => {
-        const userId = seedUser(dir)
+        const userId = await seedUser(dir)
         const p = await post(`${base}/api/products`, { sku: `T7-ROLLBACK-${Date.now()}`, name: '丙', priceCents: 500, stock: 2 })
         const before = {
-          orders: readDb(dir, 'SELECT COUNT(*) AS n FROM orders')[0].n,
-          items: readDb(dir, 'SELECT COUNT(*) AS n FROM order_items')[0].n,
-          stock: readDb(dir, `SELECT stock FROM products WHERE id = ${p.body.id}`)[0].stock,
+          orders: (await readDb(dir, 'SELECT COUNT(*) AS n FROM orders'))[0].n,
+          items: (await readDb(dir, 'SELECT COUNT(*) AS n FROM order_items'))[0].n,
+          stock: (await readDb(dir, `SELECT stock FROM products WHERE id = ${p.body.id}`))[0].stock,
         }
 
         const res = await post(`${base}/api/orders`, { userId, items: [{ productId: p.body.id, quantity: 99 }] })
@@ -260,9 +310,9 @@ const CHAPTER_CHECKS = {
         if (res.body?.error?.code !== 'OUT_OF_STOCK') return `期望 OUT_OF_STOCK，实际 ${res.body?.error?.code}`
 
         const after = {
-          orders: readDb(dir, 'SELECT COUNT(*) AS n FROM orders')[0].n,
-          items: readDb(dir, 'SELECT COUNT(*) AS n FROM order_items')[0].n,
-          stock: readDb(dir, `SELECT stock FROM products WHERE id = ${p.body.id}`)[0].stock,
+          orders: (await readDb(dir, 'SELECT COUNT(*) AS n FROM orders'))[0].n,
+          items: (await readDb(dir, 'SELECT COUNT(*) AS n FROM order_items'))[0].n,
+          stock: (await readDb(dir, `SELECT stock FROM products WHERE id = ${p.body.id}`))[0].stock,
         }
         if (JSON.stringify(after) !== JSON.stringify(before)) {
           return `回滚之后和调用前不一样：前 ${JSON.stringify(before)}，后 ${JSON.stringify(after)}`
@@ -273,10 +323,10 @@ const CHAPTER_CHECKS = {
     {
       desc: '第二件商品库存不足时，第一件的扣减也退回去',
       run: async (base, dir) => {
-        const userId = seedUser(dir)
+        const userId = await seedUser(dir)
         const a = await post(`${base}/api/products`, { sku: `T7-PART-A-${Date.now()}`, name: '甲', priceCents: 100, stock: 10 })
         const b = await post(`${base}/api/products`, { sku: `T7-PART-B-${Date.now()}`, name: '乙', priceCents: 100, stock: 1 })
-        const stockBefore = readDb(dir, `SELECT stock FROM products WHERE id = ${a.body.id}`)[0].stock
+        const stockBefore = (await readDb(dir, `SELECT stock FROM products WHERE id = ${a.body.id}`))[0].stock
 
         const res = await post(`${base}/api/orders`, {
           userId,
@@ -287,7 +337,7 @@ const CHAPTER_CHECKS = {
         })
         if (res.status !== 409) return `期望 409，实际 ${res.status}`
 
-        const stockAfter = readDb(dir, `SELECT stock FROM products WHERE id = ${a.body.id}`)[0].stock
+        const stockAfter = (await readDb(dir, `SELECT stock FROM products WHERE id = ${a.body.id}`))[0].stock
         if (stockAfter !== stockBefore) return `第一件的扣减没退回去：${stockBefore} -> ${stockAfter}`
         return true
       },
@@ -295,12 +345,12 @@ const CHAPTER_CHECKS = {
     {
       desc: '明细里的价格是快照，商品改价后历史订单金额不变',
       run: async (base, dir) => {
-        const userId = seedUser(dir)
+        const userId = await seedUser(dir)
         const p = await post(`${base}/api/products`, { sku: `T7-SNAP-${Date.now()}`, name: '快照货', priceCents: 1000, stock: 5 })
         const created = await post(`${base}/api/orders`, { userId, items: [{ productId: p.body.id, quantity: 1 }] })
         if (created.status !== 201) return `建订单返回 ${created.status}`
 
-        execDb(dir, `UPDATE products SET price_cents = 3000 WHERE id = ${p.body.id}`)
+        await execDb(dir, `UPDATE products SET price_cents = 3000 WHERE id = ${p.body.id}`)
 
         const again = await get(`${base}/api/orders/${created.body.id}`)
         if (again.body?.totalCents !== 1000) return `改价后历史订单金额变成 ${again.body?.totalCents}，应为 1000`
@@ -313,7 +363,7 @@ const CHAPTER_CHECKS = {
     {
       desc: '状态机：合法转移走通，非法转移 409 且不写库',
       run: async (base, dir) => {
-        const userId = seedUser(dir)
+        const userId = await seedUser(dir)
         const p = await post(`${base}/api/products`, { sku: `T7-FSM-${Date.now()}`, name: '状态机', priceCents: 100, stock: 5 })
         const created = await post(`${base}/api/orders`, { userId, items: [{ productId: p.body.id, quantity: 1 }] })
         const orderId = created.body.id
@@ -331,7 +381,7 @@ const CHAPTER_CHECKS = {
           return `期望 ORDER_STATE_INVALID，实际 ${bad.body?.error?.code}`
         }
 
-        const row = readDb(dir, `SELECT status FROM orders WHERE id = ${orderId}`)[0]?.status
+        const row = (await readDb(dir, `SELECT status FROM orders WHERE id = ${orderId}`))[0]?.status
         if (row !== 'completed') return `被拒绝的转移把状态改了：现在是 ${row}`
         return true
       },
@@ -357,32 +407,188 @@ const CHAPTER_CHECKS = {
       },
     },
   ],
+
+  'v1.4': [
+    {
+      desc: '底下的库是 PostgreSQL，不是 SQLite',
+      run: async (_base, dir) => {
+        // 这一条是整章的判据。上面那些接口检查就算全绿，
+        // 也可能是「代码碰巧和 SQLite 行为一致」——所以先确认底层换掉了。
+        const rows = await readDb(dir, "SELECT version() AS v")
+        const v = String(rows[0]?.v ?? '')
+        if (!v.startsWith('PostgreSQL')) return `连上的不是 PostgreSQL：${v || '(空)'}`
+        return true
+      },
+    },
+    {
+      desc: '版本表里只有一条 pg_baseline，版本从 1 重新开始',
+      run: async (_base, dir) => {
+        const rows = await readDb(dir, 'SELECT version, name FROM schema_migrations ORDER BY version')
+        const got = rows.map((r) => `${r.version}/${r.name}`).join(',')
+        if (got !== '1/pg_baseline') {
+          return `期望 1/pg_baseline，实际 ${got}。PostgreSQL 是新库的新历史，不接着 SQLite 那三个版本`
+        }
+        return true
+      },
+    },
+    {
+      desc: '基线建出了 name 和 title 两列（AUTOINCREMENT 那次变更被折叠进来了）',
+      run: async (_base, dir) => {
+        const cols = await columnsOf(dir, 'products')
+        if (!cols.includes('title')) return `没有 title 列：${JSON.stringify(cols)}`
+        if (!cols.includes('name')) return 'name 没了，基线不该删任何东西'
+        return true
+      },
+    },
+    {
+      desc: '金额仍是整数分（换库不改这一条）',
+      run: async (base) => {
+        const created = await post(`${base}/api/products`, {
+          sku: `PG-MONEY-${Date.now()}`,
+          name: '价格',
+          priceCents: 39900,
+          stock: 5,
+        })
+        if (created.status !== 201) return `建商品返回 ${created.status}`
+        const got = await get(`${base}/api/products/${created.body.id}`)
+        if (got.body?.priceCents !== 39900) return `期望 39900，实际 ${got.body?.priceCents}`
+        if (!Number.isInteger(got.body?.priceCents)) return `priceCents 不是整数：${got.body?.priceCents}`
+        return true
+      },
+    },
+    {
+      desc: '错误契约没变：同 SKU 仍然是 409 PRODUCT_SKU_TAKEN',
+      run: async (base) => {
+        // 这条是 ch08 最重要的一句：**换库不动对外的错误形状**。
+        // 底下的错误编号从 SQLite 的 errcode 787/2067 换成了 SQLSTATE，
+        // 但客户端看到的东西必须一模一样。
+        const sku = `PG-DUP-${Date.now()}`
+        const first = await post(`${base}/api/products`, { sku, name: '甲', priceCents: 100, stock: 1 })
+        if (first.status !== 201) return `第一次建商品返回 ${first.status}`
+        const second = await post(`${base}/api/products`, { sku, name: '乙', priceCents: 100, stock: 1 })
+        if (second.status !== 409) return `期望 409，实际 ${second.status}`
+        if (second.body?.error?.code !== 'PRODUCT_SKU_TAKEN') {
+          return `期望 PRODUCT_SKU_TAKEN，实际 ${second.body?.error?.code}`
+        }
+        const text = JSON.stringify(second.body)
+        if (/23505|unique_violation|duplicate key/i.test(text)) {
+          return `响应体漏出了数据库内部信息：${text}`
+        }
+        return true
+      },
+    },
+    {
+      desc: '外键冲突仍然是 409 PRODUCT_IN_USE（23503 而不是 787）',
+      run: async (base, dir) => {
+        await seedOrderReferencingProduct(dir)
+        const res = await del(`${base}/api/products/1`)
+        if (res.status !== 409) return `期望 409，实际 ${res.status}`
+        if (res.body?.error?.code !== 'PRODUCT_IN_USE') return `期望 PRODUCT_IN_USE，实际 ${res.body?.error?.code}`
+        return true
+      },
+    },
+    {
+      desc: '接口的 createdAt 还是 ISO 字符串，不是 Date 也不是本地时间格式',
+      run: async (base) => {
+        const created = await post(`${base}/api/products`, {
+          sku: `PG-TIME-${Date.now()}`,
+          name: '时间',
+          priceCents: 100,
+          stock: 1,
+        })
+        if (created.status !== 201) return `建商品返回 ${created.status}`
+        const at = created.body?.createdAt
+        if (typeof at !== 'string') return `createdAt 不是字符串：${typeof at}`
+        if (new Date(at).toISOString() !== at) return `createdAt 不是标准 ISO 串：${at}`
+        return true
+      },
+    },
+    {
+      desc: '建订单一次改三张表，金额是整数分',
+      run: async (base, dir) => {
+        const userId = await seedUser(dir)
+        const p1 = await post(`${base}/api/products`, { sku: `PG-T7-A-${Date.now()}`, name: '甲', priceCents: 1999, stock: 10 })
+        const p2 = await post(`${base}/api/products`, { sku: `PG-T7-B-${Date.now()}`, name: '乙', priceCents: 2500, stock: 10 })
+        if (p1.status !== 201 || p2.status !== 201) return `建商品失败：${p1.status} / ${p2.status}`
+
+        const res = await post(`${base}/api/orders`, {
+          userId,
+          items: [
+            { productId: p1.body.id, quantity: 2 },
+            { productId: p2.body.id, quantity: 3 },
+          ],
+        })
+        if (res.status !== 201) return `建订单期望 201，实际 ${res.status}：${JSON.stringify(res.body)}`
+        if (res.body?.totalCents !== 11498) return `期望 totalCents=11498，实际 ${res.body?.totalCents}`
+
+        const stock1 = await readDb(dir, `SELECT stock FROM products WHERE id = ${p1.body.id}`)
+        const stock2 = await readDb(dir, `SELECT stock FROM products WHERE id = ${p2.body.id}`)
+        if (stock1[0]?.stock !== 8) return `第一个商品库存期望 8，实际 ${stock1[0]?.stock}`
+        if (stock2[0]?.stock !== 7) return `第二个商品库存期望 7，实际 ${stock2[0]?.stock}`
+
+        const items = await readDb(dir, `SELECT COUNT(*) AS n FROM order_items WHERE order_id = ${res.body.id}`)
+        if (items[0]?.n !== 2) return `明细期望 2 行，实际 ${items[0]?.n}`
+        return true
+      },
+    },
+    {
+      desc: '两个并发建订单请求，一个成功一个 409，库存不会变成负数',
+      run: async (base, dir) => {
+        // 换库之后并发是真的并发了，所以这条才有意义——
+        // SQLite 整库单写者的时候，两个请求根本撞不上。
+        const userId = await seedUser(dir)
+        const p = await post(`${base}/api/products`, { sku: `PG-RACE-${Date.now()}`, name: '抢', priceCents: 100, stock: 1 })
+        if (p.status !== 201) return `准备商品失败：${p.status}`
+
+        const results = await Promise.all([
+          post(`${base}/api/orders`, { userId, items: [{ productId: p.body.id, quantity: 1 }] }),
+          post(`${base}/api/orders`, { userId, items: [{ productId: p.body.id, quantity: 1 }] }),
+        ])
+        const statuses = results.map((r) => r.status)
+        const ok = statuses.filter((s) => s === 201).length
+        const conflict = statuses.filter((s) => s === 409).length
+        if (ok !== 1 || conflict !== 1) return `期望一个 201 一个 409，实际 ${statuses.join(' / ')}`
+
+        const stock = await readDb(dir, `SELECT stock FROM products WHERE id = ${p.body.id}`)
+        if (stock[0]?.stock !== 0) return `库存期望 0，实际 ${stock[0]?.stock}。**卖出去了两件，库存还是正的**`
+        return true
+      },
+    },
+  ],
 }
 
 /**
- * 往导出目录的库里塞一个用户，返回它的 id。
- * @param {string} dir
- * @returns {number}
+ * 拿一条连到这次复现那个库的连接。
+ *
+ * SQLite 那套是同步的、每次开关一个文件；PostgreSQL 这边保持一条长连接，
+ * 因为下面的助手被调用得很频繁（每条验证命令都要查好几次库）。
+ *
+ * @returns {Promise<Client>}
  */
-function seedUser(dir) {
-  const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'))
-  try {
-    const now = new Date().toISOString()
-    const u = /** @type {{id: number}} */ (
-      db.prepare('INSERT INTO users (email, created_at) VALUES (?, ?) RETURNING id').get(`t7-${Date.now()}-${Math.random()}@example.com`, now)
-    )
-    return u.id
-  } finally {
-    db.close()
+async function pg() {
+  if (pgClient === null) {
+    if (pgUrl === null) throw new Error('pgUrl 还没设好就有人要连库了')
+    const client = new Client({ connectionString: pgUrl })
+    await client.connect()
+    pgClient = client
   }
+  return pgClient
+}
+
+/** 收尾：关掉 verify-tag 自己那条连接。 */
+async function closePg() {
+  if (pgClient === null) return
+  const client = pgClient
+  pgClient = null
+  await client.end().catch(() => {})
 }
 
 /**
- * 改导出目录里的库（写入）。
+ * 跑一条写语句（SQLite 那边专用）
  * @param {string} dir
  * @param {string} sql
  */
-function execDb(dir, sql) {
+function execDbSync(dir, sql) {
   const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'))
   try {
     db.exec(sql)
@@ -391,67 +597,159 @@ function execDb(dir, sql) {
   }
 }
 
+/** @param {string} dir @param {string} sql */
+async function execDb(dir, sql) {
+  if (DIALECT === 'sqlite') return execDbSync(dir, sql)
+  await (await pg()).query(sql)
+}
+
+/**
+ * 只读地查一下导出目录里的库
+ *
+ * **这里把名为 n 的列转成数字。** `COUNT(*)` 在 PostgreSQL 里是 bigint，
+ * `pg` 默认读成字符串，于是 `rows[0].n !== 2` 会永远成立。
+ * 验证脚本里的 `!== 2` 是在比数字，所以在这一层归一，
+ * 而不是让每一条验证命令各写一次 `Number(...)`。
+ *
+ * @param {string} dir
+ * @param {string} sql
+ * @returns {Promise<any[]>}
+ */
+async function readDb(dir, sql) {
+  if (DIALECT === 'sqlite') {
+    const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'), { readOnly: true })
+    try {
+      return db.prepare(sql).all()
+    } finally {
+      db.close()
+    }
+  }
+  const res = await (await pg()).query(sql)
+  return res.rows.map((r) => (r.n === undefined ? r : { ...r, n: Number(r.n) }))
+}
+
+/**
+ * 某张表有哪些列。SQLite 用 PRAGMA，PostgreSQL 查 information_schema。
+ * @param {string} dir
+ * @param {string} table
+ * @returns {Promise<string[]>}
+ */
+async function columnsOf(dir, table) {
+  if (DIALECT === 'sqlite') {
+    const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'), { readOnly: true })
+    try {
+      return db
+        .prepare(`PRAGMA table_info(${table})`)
+        .all()
+        .map((r) => String(r.name))
+    } finally {
+      db.close()
+    }
+  }
+  const res = await (await pg()).query(
+    'SELECT column_name FROM information_schema.columns WHERE table_name = $1 ORDER BY ordinal_position',
+    [table],
+  )
+  return res.rows.map((r) => r.column_name)
+}
+
+/**
+ * 往导出目录的库里塞一个用户，返回它的 id。
+ * @param {string} dir
+ * @returns {Promise<number>}
+ */
+async function seedUser(dir) {
+  const email = `t7-${Date.now()}-${Math.random()}@example.com`
+  const now = new Date().toISOString()
+  if (DIALECT === 'sqlite') {
+    const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'))
+    try {
+      const u = /** @type {{id: number}} */ (
+        db.prepare('INSERT INTO users (email, created_at) VALUES (?, ?) RETURNING id').get(email, now)
+      )
+      return u.id
+    } finally {
+      db.close()
+    }
+  }
+  const res = await (await pg()).query(
+    'INSERT INTO users (email, created_at) VALUES ($1, $2) RETURNING id',
+    [email, now],
+  )
+  return res.rows[0].id
+}
+
 /**
  * 往导出目录的库里插一行「有 name、title 为 NULL」的老数据，模拟回填之前的状态
  * @param {string} dir
- * @returns {number}
+ * @returns {Promise<number>}
  */
-function insertLegacyProduct(dir) {
-  const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'))
-  try {
-    const now = new Date().toISOString()
-    const row = /** @type {{id: number}} */ (
-      db
-        .prepare('INSERT INTO products (sku, name, title, price_cents, stock, created_at) VALUES (?, ?, NULL, ?, ?, ?) RETURNING id')
-        .get(`LEGACY-${Date.now()}-${Math.floor(Math.random() * 10000)}`, '老数据老名字', 1000, 5, now)
-    )
-    return row.id
-  } finally {
-    db.close()
+async function insertLegacyProduct(dir) {
+  const now = new Date().toISOString()
+  const sku = `LEGACY-${Date.now()}-${Math.floor(Math.random() * 10000)}`
+  if (DIALECT === 'sqlite') {
+    const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'))
+    try {
+      const row = /** @type {{id: number}} */ (
+        db
+          .prepare('INSERT INTO products (sku, name, title, price_cents, stock, created_at) VALUES (?, ?, NULL, ?, ?, ?) RETURNING id')
+          .get(sku, '老数据老名字', 1000, 5, now)
+      )
+      return row.id
+    } finally {
+      db.close()
+    }
   }
+  const res = await (await pg()).query(
+    'INSERT INTO products (sku, name, title, price_cents, stock, created_at) VALUES ($1, $2, NULL, $3, $4, $5) RETURNING id',
+    [sku, '老数据老名字', 1000, 5, now],
+  )
+  return res.rows[0].id
 }
 
 /**
  * 往导出目录的库里插一条「订单引用了 product 1」的状态，制造 ch04 那个失败场景。
  * @param {string} dir
+ * @returns {Promise<void>}
  */
-function seedOrderReferencingProduct(dir) {
-  const path = join(dir, 'apps', 'api', 'data', 'app.db')
-  const db = new DatabaseSync(path)
-  try {
-    const now = new Date().toISOString()
-    const u = /** @type {{id: number}} */ (
-      db.prepare('INSERT INTO users (email, created_at) VALUES (?, ?) RETURNING id').get(`verify-${Date.now()}@example.com`, now)
-    )
-    const o = /** @type {{id: number}} */ (
-      db
-        .prepare('INSERT INTO orders (user_id, status, total_cents, created_at) VALUES (?, ?, ?, ?) RETURNING id')
-        .get(u.id, 'paid', 39900, now)
-    )
-    db.prepare('INSERT INTO order_items (order_id, product_id, quantity, unit_price_cents) VALUES (?, ?, ?, ?)').run(
-      o.id,
-      1,
-      1,
-      39900,
-    )
-  } finally {
-    db.close()
+async function seedOrderReferencingProduct(dir) {
+  const now = new Date().toISOString()
+  if (DIALECT === 'sqlite') {
+    const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'))
+    try {
+      const u = /** @type {{id: number}} */ (
+        db.prepare('INSERT INTO users (email, created_at) VALUES (?, ?) RETURNING id').get(`verify-${Date.now()}@example.com`, now)
+      )
+      const o = /** @type {{id: number}} */ (
+        db
+          .prepare('INSERT INTO orders (user_id, status, total_cents, created_at) VALUES (?, ?, ?, ?) RETURNING id')
+          .get(u.id, 'paid', 39900, now)
+      )
+      db.prepare('INSERT INTO order_items (order_id, product_id, quantity, unit_price_cents) VALUES (?, ?, ?, ?)').run(
+        o.id,
+        1,
+        1,
+        39900,
+      )
+      return
+    } finally {
+      db.close()
+    }
   }
-}
 
-/**
- * 只读地查一下导出目录里的库
- * @param {string} dir
- * @param {string} sql
- * @returns {any[]}
- */
-function readDb(dir, sql) {
-  const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'), { readOnly: true })
-  try {
-    return db.prepare(sql).all()
-  } finally {
-    db.close()
-  }
+  const c = await pg()
+  const u = await c.query('INSERT INTO users (email, created_at) VALUES ($1, $2) RETURNING id', [
+    `verify-${Date.now()}@example.com`,
+    now,
+  ])
+  const o = await c.query(
+    "INSERT INTO orders (user_id, status, total_cents, created_at) VALUES ($1, 'paid', 39900, $2) RETURNING id",
+    [u.rows[0].id, now],
+  )
+  await c.query(
+    'INSERT INTO order_items (order_id, product_id, quantity, unit_price_cents) VALUES ($1, 1, 1, 39900)',
+    [o.rows[0].id],
+  )
 }
 
 /**
@@ -523,12 +821,39 @@ try {
     timeout: INSTALL_TIMEOUT_MS,
   })
 
+  // 每次复现用一个专属的库，跑完删掉。
+  // 不用开发库也不用共享的测试库：复现脚本会建表、删表、造数据，
+  // 而你可能正开着 dev:api 指着同一个库。
+  let childEnv = { ...process.env }
+  if (DIALECT === 'postgres') {
+    step(`建一个专属的 PostgreSQL 库：${PG_DB_NAME}`)
+    const url = new URL(PG_BASE_URL)
+    url.pathname = `/${PG_DB_NAME}`
+    pgUrl = url.toString()
+
+    const admin = new Client({ connectionString: withDbName(PG_BASE_URL, 'postgres') })
+    await admin.connect()
+    try {
+      await admin.query(`DROP DATABASE IF EXISTS "${PG_DB_NAME}" WITH (FORCE)`)
+      await admin.query(`CREATE DATABASE "${PG_DB_NAME}"`)
+    } finally {
+      await admin.end()
+    }
+    console.log(`   连接串：${pgUrl}`)
+    // 跑测试和起服务都指着它。测试自己会在这个库名后面加 _test_<pid>，
+    // 所以测试碰不到服务用的这个库。
+    childEnv = { ...process.env, DATABASE_URL: pgUrl }
+  } else {
+    console.log(`   方言：SQLite（${tag} 早于换库那一章）`)
+  }
+
   step('跑测试')
   const test = npmArgs(['test'])
   execFileSync(test.cmd, test.args, {
     cwd: workDir,
     stdio: 'inherit',
     timeout: TEST_TIMEOUT_MS,
+    env: childEnv,
   })
 
   step('起服务并等健康检查通过')
@@ -539,7 +864,7 @@ try {
 
   server = spawn(process.execPath, [join(workDir, 'node_modules', 'tsx', 'dist', 'cli.mjs'), 'apps/api/src/index.ts'], {
     cwd: workDir,
-    env: { ...process.env, PORT: String(port) },
+    env: { ...childEnv, PORT: String(port) },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   server.stdout.on('data', (d) => process.stdout.write(`   [服务] ${d}`))
@@ -630,6 +955,26 @@ try {
   if (workDir) {
     rmSync(workDir, { recursive: true, force: true })
     console.log(`   已删除临时目录 ${workDir}`)
+  }
+  if (pgClient !== null) {
+    await closePg()
+  }
+  if (pgUrl !== null) {
+    // WITH (FORCE)：服务刚被 taskkill 掉，连接可能还挂着。
+    // 删库失败只提示，不改退出码——复现本身的结论已经定了。
+    try {
+      const admin = new Client({ connectionString: withDbName(PG_BASE_URL, 'postgres') })
+      await admin.connect()
+      try {
+        await admin.query(`DROP DATABASE IF EXISTS "${PG_DB_NAME}" WITH (FORCE)`)
+        console.log(`   已删除数据库 ${PG_DB_NAME}`)
+      } finally {
+        await admin.end()
+      }
+    } catch (err) {
+      console.error(`   删库失败：${err instanceof Error ? err.message : String(err)}`)
+      console.error(`   手动清：docker exec fullstack-backend-db dropdb -U postgres --if-exists ${PG_DB_NAME}`)
+    }
   }
 }
 

@@ -1,23 +1,29 @@
-import { mkdtempSync, rmSync } from 'node:fs'
-import { tmpdir } from 'node:os'
-import { join } from 'node:path'
 import type { Server } from 'node:http'
-import type { DatabaseSync } from 'node:sqlite'
 import type { Db } from '../src/db/index.ts'
+import { assertTestDatabase, disposeTestDatabase, prepareTestDatabase, TEST_DATABASE_URL } from './test-db.ts'
 
 /**
  * 集成测试的公共启动逻辑。
  *
- * 四条约定，每条都对应一类「跑测试把开发环境搞坏」的方式：
+ * 三条约定，每条都对应一类「跑测试把开发环境搞坏」的方式：
  *
- * 1. 临时数据库。DB_PATH 指向 mkdtemp 出来的目录，所以测试碰不到
- *    apps/api/data/app.db 里的开发数据。
+ * 1. **一人一个库。** Node 的 test runner 并行跑各个测试文件，
+ *    所以每个进程建一个自己的库（名字带进程号），跑完删掉。
+ *    共用一个库再清空是**不行的**——并行跑的时候它们会互相把对方的表删掉。
+ *    库名必须含 `_test`，不满足直接抛错退出。
  * 2. 临时端口。listen(0) 让系统给一个空端口，可以一边跑测试一边跑
  *    npm run dev:api，不用抢 3002。
- * 3. 动态 import。ESM 的 import 会被提升到文件顶部，DB_PATH 就来不及设了。
- *    所以 createApp 必须在 start() 内部 await 进来。
- * 4. 先关库再删目录。db/sqlite.ts 的连接是模块级单例，不关的话
- *    Windows 上文件被锁住，rmSync 会报 EPERM。
+ * 3. 动态 import。ESM 的 import 会被提升到文件顶部，连接串就来不及设了。
+ *    而驱动一被 import 就立刻连库跑迁移——所以 createApp 和驱动都必须在
+ *    start() 内部 await 进来。
+ *
+ * ## 换库带来的两个变化
+ *
+ * - **不再有 `rawDb`。** 换库之前测试可以拿 `node:sqlite` 的原始连接
+ *   直接写、直接 `PRAGMA table_info`。现在没有「原始连接」这种说法了——
+ *   池里的连接谁在用不归你管，而且 PostgreSQL 里 `PRAGMA` 根本不存在。
+ *   所有写库都走 `db`，这也顺带证明了数据层那三个方法够用。
+ * - **先建库，再 import。** 顺序反了的话迁移会跑在一个还没建的库上。
  *
  * 之所以抽成文件而不是每个测试文件各写一遍：三组测试的启动代码完全一样，
  * 抄三份就意味着以后改启动方式要改三处，漏一处就是一组测试行为不一样。
@@ -25,17 +31,18 @@ import type { Db } from '../src/db/index.ts'
 
 export type Harness = {
   baseUrl: string
-  rawDb: DatabaseSync
   db: Db
   close: () => Promise<void>
 }
 
 export async function startHarness(): Promise<Harness> {
-  const tempDir = mkdtempSync(join(tmpdir(), 'backend-test-'))
-  process.env.DB_PATH = join(tempDir, 'test.db')
+  // 先备库，再设连接串，最后才 import 驱动。顺序反了必错。
+  assertTestDatabase(TEST_DATABASE_URL)
+  const url = await prepareTestDatabase()
+  process.env.DATABASE_URL = url
 
   const { createApp } = await import('../src/app.ts')
-  const { closeDb, rawDb, db } = await import('../src/db/sqlite.ts')
+  const { db, closeDb } = await import('../src/db/postgres.ts')
   const app = createApp()
 
   const server: Server = app.listen(0)
@@ -51,15 +58,26 @@ export async function startHarness(): Promise<Harness> {
 
   return {
     baseUrl: `http://127.0.0.1:${address.port}`,
-    rawDb,
     db,
     close: async () => {
       await new Promise<void>((resolve, reject) => {
         server.close((err) => (err ? reject(err) : resolve()))
       })
-      closeDb()
-      rmSync(tempDir, { recursive: true, force: true })
-      delete process.env.DB_PATH
+
+      // `pool.end()` 会等所有借出去的连接还回来。
+      // **代码坏掉的时候可能永远等不到**——比如事务失败路径忘了 release，
+      // 那条连接就一直挂着，end() 就不返回，整个测试进程会挂到超时。
+      //
+      // 测试结果那时候已经报出来了，挂着的只是收尾。
+      // 所以这里给它一个上界：等不到就往下走，
+      // 反正后面那个 DROP DATABASE ... WITH (FORCE) 会把连接全踢掉。
+      await Promise.race([
+        closeDb(),
+        new Promise<void>((resolve) => setTimeout(resolve, 3000)),
+      ])
+
+      // 池关了才敢删库。顺序反了 DROP DATABASE 会因为有连接而失败。
+      await disposeTestDatabase()
     },
   }
 }
@@ -108,14 +126,17 @@ export type ErrorBody = {
  *
  * 没有用户接口——`users` 表建了但一直没有对外的接口。
  * 测试需要它是因为订单必须属于某个用户（外键约束），所以这里直接写库。
- * 用 rawDb 而不走 fetch，因为没有接口可调。
+ * 走 db 而不是 fetch，因为没有接口可调。
  */
 let userSeq = 0
-export function createUser(rawDb: DatabaseSync): number {
+export async function createUser(db: Db): Promise<number> {
   userSeq += 1
-  const email = `user-${userSeq}@example.test`
-  rawDb.prepare('INSERT INTO users (email, created_at) VALUES (?, ?)').run(email, new Date().toISOString())
-  const row = rawDb.prepare('SELECT id FROM users WHERE email = ?').get(email) as { id: number }
+  const rows = await db.query<{ id: number }>(
+    'INSERT INTO users (email, created_at) VALUES (?, ?) RETURNING id',
+    [`user-${userSeq}@example.test`, new Date().toISOString()],
+  )
+  const row = rows[0]
+  if (row === undefined) throw new Error('建用户没有返回行')
   return row.id
 }
 
