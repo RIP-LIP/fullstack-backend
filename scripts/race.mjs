@@ -2,10 +2,11 @@
  * 丢失更新：两个并发请求同时抢最后一件库存。
  *
  * 跑法：
- *   node scripts/race.mjs              三个场景都跑
+ *   node scripts/race.mjs              四个场景都跑
  *   node scripts/race.mjs lost         只跑「先查后写」
  *   node scripts/race.mjs guarded      只跑「把判断放进 WHERE」
  *   node scripts/race.mjs serializable 只跑「同样的先查后写 + SERIALIZABLE」
+ *   node scripts/race.mjs pool         只跑「池耗尽时是什么样」
  *
  * 它连的是**开发库**（DATABASE_URL），并且会往 products 里造数据。
  * 跑之前先 `docker compose up -d`。
@@ -20,7 +21,7 @@
  * 到齐才走，时序是确定的。
  */
 
-import { Client } from 'pg'
+import { Client, Pool } from 'pg'
 
 const URL = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/orders'
 
@@ -280,10 +281,56 @@ async function serializable() {
   console.log('  而重试又要求写操作本身是幂等的。')
 }
 
+/* ------------------------------------------------------------------ *
+ * 场景四：连接池耗尽时是什么样
+ * ------------------------------------------------------------------ */
+
+/** @returns {Promise<void>} */
+async function pool() {
+  head('场景四：连接池耗尽时是什么样')
+
+  // 特意开一个 max=1 的池，这样一条连接就能演示清楚。
+  const small = new Pool({ connectionString: URL, max: 1 })
+
+  // 把唯一那条借走，攥在事务里不放
+  const held = await small.connect()
+  await held.query('BEGIN')
+  console.log('  借走了池里唯一那条连接，开始一个事务')
+
+  // 现在池空了。下面这个查询**不会报错**，它排队等着。
+  const t0 = Date.now()
+  const waiting = small.query('SELECT 1 AS n')
+  console.log('  发第二个查询——它没有报错，也没有立刻返回，它在排队')
+
+  await new Promise((r) => setTimeout(r, 800))
+  console.log(`  攥了 800ms 之后才放。`)
+
+  await held.query('COMMIT')
+  held.release()
+  console.log('  放掉那条连接')
+
+  const res = await waiting
+  const waited = Date.now() - t0
+  console.log(`  排队的那个查询这时才返回，拿到 ${JSON.stringify(res.rows[0])}`)
+  console.log('')
+  console.log(`  它等了 ${waited} ms。`)
+  console.log('')
+  console.log('  **池耗尽的表现是排队，不是报错。**')
+  console.log('  这就是为什么「连接池满了」这个故障很难查：')
+  console.log('  日志里没有异常、没有 500，只有一堆请求慢慢变慢，')
+  console.log('  最后全堆在超时上，看起来像「数据库很慢」。')
+  console.log('')
+  console.log('  两条出路：把 max 调大，或者把事务做短。')
+  console.log('  调大 max 只是把排队往后推——每个连接都是一条网络往返，')
+  console.log('  而数据库能同时处理多少是它自己的事，不是你池子大就行的。')
+
+  await small.end()
+}
+
 /* ------------------------------------------------------------------ */
 
 /** @type {Record<string, () => Promise<void>>} */
-const ALL = { lost, guarded, serializable }
+const ALL = { lost, guarded, serializable, pool }
 
 /**
  * @param {Record<string, () => Promise<void>>} all

@@ -116,6 +116,14 @@ function withDbName(connectionString, name) {
  * @type {Record<string, Array<{desc: string, run: (base: string, dir: string) => Promise<true|string>}>>}
  */
 const CHAPTER_CHECKS = {
+  // v0.0 是立项基线，不对应任何一章，所以它**显式**声明「本章无验证命令」。
+  //
+  // 空数组和不写这一项是两件事：
+  //   空数组      = 这一章确实没有要验的东西（只有 v0.0 属于这种）
+  //   整项缺失    = 加了新章节忘了加检查 -> 退出 1
+  // 少了这个区分，v0.0 就会永远退出 1，而 README 写着每个 tag 都能复现。
+  'v0.0': [],
+
   'v1.0': [
     {
       desc: 'POST /api/products 合法输入返回 201，并带上数据库自动发的 id',
@@ -901,29 +909,35 @@ try {
     fail(`tag ${tag} 缺少本章验证命令`)
   }
 
-  let passed = 0
-  for (const check of checks) {
-    let verdict
-    try {
-      verdict = await check.run(baseUrl, workDir)
-    } catch (err) {
-      verdict = `抛异常：${err instanceof Error ? err.message : String(err)}`
+  if (checks.length === 0) {
+    // 显式声明「这一章没有要验的东西」。走这条路只有一个 tag：v0.0。
+    // 不能提前 return——下面这整段在一个顶层 try 里，return 在那里是非法的。
+    console.log(`   ${tag} 不对应任何一章，本章没有验证命令。`)
+  } else {
+    let passed = 0
+    for (const check of checks) {
+      let verdict
+      try {
+        verdict = await check.run(baseUrl, workDir)
+      } catch (err) {
+        verdict = `抛异常：${err instanceof Error ? err.message : String(err)}`
+      }
+
+      if (verdict === true) {
+        passed++
+        console.log(`   ✔ ${check.desc}`)
+      } else {
+        console.error(`   ✘ ${check.desc}`)
+        console.error(`       ${verdict}`)
+        failedChecks.push(check.desc)
+      }
     }
 
-    if (verdict === true) {
-      passed++
-      console.log(`   ✔ ${check.desc}`)
-    } else {
-      console.error(`   ✘ ${check.desc}`)
-      console.error(`       ${verdict}`)
-      failedChecks.push(check.desc)
+    if (failedChecks.length > 0) {
+      fail(`${failedChecks.length}/${checks.length} 条本章验证命令没过`)
     }
+    console.log(`   ${passed}/${checks.length} 条通过`)
   }
-
-  if (failedChecks.length > 0) {
-    fail(`${failedChecks.length}/${checks.length} 条本章验证命令没过`)
-  }
-  console.log(`   ${passed}/${checks.length} 条通过`)
 
   console.log(`\n${tag} 复现通过。`)
   process.exitCode = 0
