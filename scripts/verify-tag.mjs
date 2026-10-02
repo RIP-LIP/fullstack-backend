@@ -66,16 +66,11 @@ try {
   step('安装依赖')
   // 有 lock 就走 npm ci，因为它严格按 lock 装，能顺带发现 lock 和 package.json 不同步
   const hasLock = existsSync(join(workDir, 'package-lock.json'))
-  const installCmd = hasLock ? 'npm ci' : 'npm install'
-  console.log(`   执行：${installCmd}`)
-  execFileSync('npm', hasLock ? ['ci'] : ['install'], {
-    cwd: workDir,
-    stdio: 'inherit',
-    shell: true, // Windows 上 npm 是 npm.cmd，不加这个 spawnSync 找不到
-  })
+  console.log(`   执行：${hasLock ? 'npm ci' : 'npm install'}`)
+  execFileSync(npmBin(), hasLock ? ['ci'] : ['install'], { cwd: workDir, stdio: 'inherit' })
 
   step('跑测试')
-  execFileSync('npm', ['test'], { cwd: workDir, stdio: 'inherit', shell: true })
+  execFileSync(npmBin(), ['test'], { cwd: workDir, stdio: 'inherit' })
 
   step('起服务并等健康检查通过')
   // 自己找一个空端口，不用 3002——那可能正被你自己开着的服务占着，
@@ -136,6 +131,16 @@ try {
 
 function step(msg) {
   console.log(`\n▸ ${msg}`)
+}
+
+/**
+ * Windows 上 npm 是个 .cmd 包装脚本，直接 spawn('npm') 找不到。
+ * 用 npmBin() 指到 .cmd 就够，不需要开 shell。
+ * 开 shell 会触发 Node 的 DEP0190 警告：参数不经转义只做拼接，
+ * 路径里有空格或特殊字符时行为不可预期。
+ */
+function npmBin() {
+  return process.platform === 'win32' ? 'npm.cmd' : 'npm'
 }
 
 function fail(msg) {
