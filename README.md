@@ -23,7 +23,7 @@ Node 版本下限不是拍脑袋定的。`node:sqlite` 在 v22.5.0 加入，但�
 docker compose up -d     # 起 PostgreSQL
 docker compose ps        # 看到 healthy 才算好
 npm install
-npm test                 # 135 条测试
+npm test                 # 148 条测试
 npm run dev:api          # 起服务，监听 3002
 ```
 
@@ -73,12 +73,13 @@ apps/api/
   src/app.ts                 Express 组装，导出以便测试
   src/config.ts              环境变量集中读
   src/errors.ts              统一错误形状 + 数据库约束的识别（SQLSTATE）
+  src/idempotency.ts         幂等：指纹、占键、回填、还键
   src/db/index.ts            数据访问层的接口（三个方法）
   src/db/postgres.ts         pg 实现，全项目唯一知道底层的地方
   src/db/placeholders.ts     ? 占位符改写成 $1（纯函数，可单独测）
   src/db/errors.ts           数据层自己的错误类型
   src/db/migrate.ts          迁移执行器（不认识任何一套具体迁移）
-  src/db/migrations/pg/      PostgreSQL 这套：001_pg_baseline
+  src/db/migrations/pg/      PostgreSQL 这套：001_pg_baseline、002_idempotency_keys
   src/db/migrations/sqlite/  SQLite 那套，冻结的历史
   src/routes/products.ts     商品接口
   src/routes/orders.ts       订单接口
@@ -94,6 +95,7 @@ apps/api/
   test/expand.test.ts        双读双写与回填
   test/orders.test.ts        订单接口与状态机
   test/transaction.test.ts   事务边界（并发请求的写入不会被吞）
+  test/idempotency.test.ts   幂等：重放、指纹不匹配、失败还键、并发重发
   test/placeholder.test.ts   占位符改写：每一类不该改的区域
   test/pg-types.test.ts      PostgreSQL 的取值规则（时间、整数、列）
   test/frozen.test.ts        SQLite 那三个迁移不许改
@@ -102,7 +104,7 @@ packages/shared/
   test/schema.test.ts        入参校验规则的单元测试
 scripts/
   verify-tag.mjs             tag 级复现（两种方言都认）
-  race.mjs                   丢失更新：三个并发场景，带显式 barrier
+  race.mjs                   丢失更新与连接池：四个场景，带显式 barrier
   backfill.mjs               分批回填（幂等 + 可中断 + 进度守卫）
   reset-db.mjs               清空开发库（不可恢复）
   probe.mjs                  事务那章的实验，外加一条只读查库命令
@@ -122,6 +124,7 @@ docker-compose.yml           PostgreSQL
 | `v1.2` | ch06 | expand 阶段：加 title 列、双读双写 | 5 条 |
 | `v1.3` | ch07 | 订单接口、状态机、事务的连接归属 | 6 条 |
 | `v1.4` | ch08 | 换 PostgreSQL：占位符改写、pg 迁移基线、SQLSTATE 错误码 | 9 条 |
+| `v1.5` | ch09 | 幂等：唯一约束当判据、失败时还键 | 6 条 |
 
 `v0.0` 不对应任何一章，它代表「讲任何一章之前，仓库长这样」。
 
@@ -165,7 +168,7 @@ node scripts/probe.mjs check      # CHECK 只管值域，不管转移
 npm run race
 ```
 
-两个连接用**显式 barrier** 同时读到同一个 stock，跑三个场景：先查后写（复现丢失更新）、把判断放进 `WHERE`（不丢）、同样的先查后写但 `SERIALIZABLE`（提交时报 40001）。**会往开发库里造几件商品。**
+两个连接用**显式 barrier** 同时读到同一个 stock，跑四个场景：先查后写（复现丢失更新）、把判断放进 `WHERE`（不丢）、同样的先查后写但 `SERIALIZABLE`（提交时报 40001）、池耗尽时是什么样（排队 823ms，不是报错）。**会往开发库里造几件商品。**
 
 不用 sleep 撞运气是刻意的：用 `setTimeout` 猜并发，十次里有九次不并发，而那一次没复现出来你会以为「PG 挡住了」——结论完全反了。
 
