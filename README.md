@@ -19,7 +19,7 @@ Node 版本下限不是拍脑袋定的。`node:sqlite` 在 v22.5.0 加入，但�
 
 ```bash
 npm install
-npm test          # 35 条测试
+npm test          # 47 条测试
 npm run dev:api   # 起服务，监听 3002
 ```
 
@@ -40,7 +40,9 @@ Content-Type: application/json; charset=utf-8
 
 ## 数据库
 
-用的是 SQLite，数据库文件是 `apps/api/data/app.db`，**起后端时自动建表**，不需要执行任何 SQL 命令。测试跑在临时目录上，不会碰到你开发库里的数据。
+用的是 SQLite，数据库文件是 `apps/api/data/app.db`。**起后端时自动跑迁移**，不需要执行任何 SQL 命令。测试跑在临时目录上，不会碰到你开发库里的数据。
+
+表结构改了就加一个迁移文件放进 `apps/api/src/db/migrations/`，**不要回头改已经提交过的迁移**——启动时会拿迁移内容算 checksum 和库里的记录对，对不上直接退出并告诉你哪个版本出了问题。
 
 开发库搞坏了就重置（**不可恢复**）：
 
@@ -68,6 +70,8 @@ apps/api/
   src/errors.ts              统一错误形状 + 数据库约束的识别
   src/db/index.ts            数据访问层的接口（三个方法）
   src/db/sqlite.ts           node:sqlite 实现，全项目唯一知道底层的地方
+  src/db/migrate.ts          迁移执行器
+  src/db/migrations/         001_init、002_add_product_description
   src/routes/products.ts     商品接口
   src/routes/async-handler.ts 让 async 路由的错误能走到错误中间件
   test/harness.ts            测试的公共启动逻辑
@@ -75,6 +79,7 @@ apps/api/
   test/products.test.ts      商品接口
   test/foreign-key.test.ts   外键约束
   test/money.test.ts         金额为什么存整数分
+  test/migrate.test.ts       迁移
 packages/shared/             Zod schema 与共享类型
 scripts/
   verify-tag.mjs             tag 级复现
@@ -89,6 +94,7 @@ docker-compose.yml           PostgreSQL
 | --- | --- | --- |
 | `v0.0` | 无 | 立项基线：能跑、能测、能复现 |
 | `v1.0` | ch04 | 四张表、外键约束、金额存整数分 |
+| `v1.1` | ch05 | 版本表、checksum、每个迁移一个事务 |
 
 `v0.0` 不对应任何一章，它代表「讲任何一章之前，仓库长这样」。
 
