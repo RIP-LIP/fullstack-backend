@@ -295,6 +295,12 @@ scripts/                         verify-tag / race / backfill / reset-db / probe
 - commit message 里不要出现双引号；用 `git commit -F %TEMP%\msg.txt`，
   文件放 `%TEMP%`（放仓库里会被 `git add -A` 带进去）
 - 仓库根不要留日志文件
+- **脚本里不要把局部变量命名为 `URL`**。它会遮蔽全局的 `URL` 构造器，
+  下一行 `new URL(...)` 报「不是构造函数」，运行时也一样炸。
+  **这个坑本会话踩了两次**（`reset-db.mjs` 和 `drop-test-dbs.mjs`），
+  两次都是 `tsc` 抓到的——所以 scripts 纳入类型检查是有用的，不是形式主义
+- 强停的测试进程会留下 `orders_test_<pid>` 库。
+  清一次：`node scripts/drop-test-dbs.mjs`（不加 `--yes` 只列不删）
 
 ## 下一步
 
@@ -328,5 +334,5 @@ git push -u origin main
 git push --tags
 ```
 
-**推送之前要确认两件事**：`orders_test` 那个库不会跟着代码走（它在容器里），
-以及 `apps/api/data/` 已经在 `.gitignore` 里。
+**推送之前要确认两件事**：测试用的库全在容器里（`pg_database` 是容器内的东西，
+代码推不走它），以及 `apps/api/data/` 已经在 `.gitignore` 里。

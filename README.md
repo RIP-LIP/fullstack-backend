@@ -55,6 +55,16 @@ npm run db:reset              # 先打印库名并拒绝执行
 npm run db:reset -- --yes     # 真的要删才加这个
 ```
 
+测试是一进程一个库、跑完就删的，但**测试进程被强杀**的时候
+（Ctrl+C、任务管理器）那个库会留下来。清一次：
+
+```bash
+node scripts/drop-test-dbs.mjs          # 只列出将要删的，不动手
+node scripts/drop-test-dbs.mjs --yes    # 真删
+```
+
+它只删**名字里带 `_test`** 的库，开发库碰不到。
+
 PostgreSQL 的 compose 文件：
 
 ```bash
@@ -107,6 +117,7 @@ scripts/
   race.mjs                   丢失更新与连接池：四个场景，带显式 barrier
   backfill.mjs               分批回填（幂等 + 可中断 + 进度守卫）
   reset-db.mjs               清空开发库（不可恢复）
+  drop-test-dbs.mjs          清残留的测试库（强停测试留下的）
   probe.mjs                  事务那章的实验，外加一条只读查库命令
   check-encoding.mjs         乱码检查
 docker-compose.yml           PostgreSQL
