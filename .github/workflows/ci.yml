@@ -29,5 +29,10 @@ jobs:
       - name: 类型检查
         run: npm run typecheck
 
+      # 乱码不影响编译也不影响测试，只有专门这一步会拦。
+      # 中文注释里夹一个坏字符，任何其他检查都是绿的，但读者会在屏幕上看到它。
+      - name: 查乱码
+        run: npm run check:encoding
+
       - name: 跑测试
         run: npm test

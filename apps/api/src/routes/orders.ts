@@ -2,7 +2,7 @@ import { Router } from 'express'
 import { CreateOrderInput, TransitionInput } from '@fullstack/shared'
 import type { Order, OrderItem, OrderStatus } from '@fullstack/shared'
 import { db } from '../db/sqlite.ts'
-import { HttpError, isConstraint } from '../errors.ts'
+import { HttpError } from '../errors.ts'
 import { asyncHandler } from './async-handler.ts'
 import { allowedFrom, canTransition } from '../order-state.ts'
 
@@ -118,89 +118,87 @@ ordersRouter.post(
       throw new HttpError(400, 'VALIDATION_FAILED', '输入不符合要求', flatten(parsed.error))
     }
 
-    try {
-      const order = await db.transaction(async (tx) => {
-        const user = await tx.one<{ id: number }>('SELECT id FROM users WHERE id = ?', [parsed.data.userId])
-        if (user === undefined) {
-          throw new HttpError(404, 'USER_NOT_FOUND', `用户 ${parsed.data.userId} 不存在`)
-        }
-
-        /**
-         * 先把每件商品的价格和标题读出来。
-         *
-         * 读到内存里之后再写明细，是为了保证「同一件商品在一个订单里
-         * 只有一个价格快照」。如果每写一行明细就重新查一次价，
-         * 而中间有人在改价，同一个订单里两行会拿到不同的价。
-         */
-        const lines: Array<{ productId: number; quantity: number; price: number; title: string }> = []
-
-        for (const item of parsed.data.items) {
-          const product = await tx.one<{ id: number; price_cents: number; title: string | null; name: string }>(
-            'SELECT id, price_cents, title, name FROM products WHERE id = ?',
-            [item.productId],
-          )
-          if (product === undefined) {
-            throw new HttpError(404, 'PRODUCT_NOT_FOUND', `商品 ${item.productId} 不存在`)
-          }
-
-          // 扣库存。判断在 WHERE 里，靠 changes 判断有没有扣成功。
-          const updated = await tx.query<{ id: number }>(
-            'UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ? RETURNING id',
-            [item.quantity, item.productId, item.quantity],
-          )
-          if (updated.length === 0) {
-            throw new HttpError(409, 'OUT_OF_STOCK', `商品 ${item.productId} 库存不足`)
-          }
-
-          lines.push({
-            productId: item.productId,
-            quantity: item.quantity,
-            price: product.price_cents,
-            // 和 products 接口一样，title 优先、退回 name。
-            title: product.title ?? product.name,
-          })
-        }
-
-        const totalCents = lines.reduce((sum, l) => sum + l.price * l.quantity, 0)
-        const now = new Date().toISOString()
-
-        const created = await tx.query<OrderRow>(
-          `INSERT INTO orders (user_id, status, total_cents, created_at)
-           VALUES (?, 'pending', ?, ?)
-           RETURNING *`,
-          [parsed.data.userId, totalCents, now],
-        )
-        const orderRow = created[0] as OrderRow
-
-        for (const line of lines) {
-          await tx.query(
-            `INSERT INTO order_items (order_id, product_id, quantity, unit_price_cents)
-             VALUES (?, ?, ?, ?)`,
-            [orderRow.id, line.productId, line.quantity, line.price],
-          )
-        }
-
-        return rowToOrder(
-          orderRow,
-          lines.map((l) => ({
-            order_id: orderRow.id,
-            product_id: l.productId,
-            quantity: l.quantity,
-            unit_price_cents: l.price,
-            product_title: l.title,
-          })),
-        )
-      })
-
-      res.status(201).json(order)
-    } catch (err) {
-      // 用户表的外键也可能先撞上（checkJs 关着时类型不认这个 catch 变量）
-      if (err instanceof HttpError) throw err
-      if (isConstraint(err, 'foreignkey')) {
-        throw new HttpError(409, 'ORDER_IN_USE', '引用的用户或商品不存在')
+    /**
+     * 用户和商品都在事务里显式查过，各自抛 404。
+     *
+     * 所以这里**没有**约束冲突需要翻译。真撞上外键，只能说明上面的查询和
+     * 插入之间出了别的问题——那种情况应该落到 500，让日志说话，
+     * 而不是伪装成一个 409 说「东西不存在」。
+     */
+    const order = await db.transaction(async (tx) => {
+      const user = await tx.one<{ id: number }>('SELECT id FROM users WHERE id = ?', [parsed.data.userId])
+      if (user === undefined) {
+        throw new HttpError(404, 'USER_NOT_FOUND', `用户 ${parsed.data.userId} 不存在`)
       }
-      throw err
-    }
+
+      /**
+       * 先把每件商品的价格和标题读出来。
+       *
+       * 读到内存里之后再写明细，是为了保证「同一件商品在一个订单里
+       * 只有一个价格快照」。如果每写一行明细就重新查一次价，
+       * 而中间有人在改价，同一个订单里两行会拿到不同的价。
+       */
+      const lines: Array<{ productId: number; quantity: number; price: number; title: string }> = []
+
+      for (const item of parsed.data.items) {
+        const product = await tx.one<{ id: number; price_cents: number; title: string | null; name: string }>(
+          'SELECT id, price_cents, title, name FROM products WHERE id = ?',
+          [item.productId],
+        )
+        if (product === undefined) {
+          throw new HttpError(404, 'PRODUCT_NOT_FOUND', `商品 ${item.productId} 不存在`)
+        }
+
+        // 扣库存。判断在 WHERE 里，靠 changes 判断有没有扣成功。
+        const updated = await tx.query<{ id: number }>(
+          'UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ? RETURNING id',
+          [item.quantity, item.productId, item.quantity],
+        )
+        if (updated.length === 0) {
+          throw new HttpError(409, 'OUT_OF_STOCK', `商品 ${item.productId} 库存不足`)
+        }
+
+        lines.push({
+          productId: item.productId,
+          quantity: item.quantity,
+          price: product.price_cents,
+          // 和 products 接口一样，title 优先、退回 name。
+          title: product.title ?? product.name,
+        })
+      }
+
+      const totalCents = lines.reduce((sum, l) => sum + l.price * l.quantity, 0)
+      const now = new Date().toISOString()
+
+      const created = await tx.query<OrderRow>(
+        `INSERT INTO orders (user_id, status, total_cents, created_at)
+         VALUES (?, 'pending', ?, ?)
+         RETURNING *`,
+        [parsed.data.userId, totalCents, now],
+      )
+      const orderRow = created[0] as OrderRow
+
+      for (const line of lines) {
+        await tx.query(
+          `INSERT INTO order_items (order_id, product_id, quantity, unit_price_cents)
+           VALUES (?, ?, ?, ?)`,
+          [orderRow.id, line.productId, line.quantity, line.price],
+        )
+      }
+
+      return rowToOrder(
+        orderRow,
+        lines.map((l) => ({
+          order_id: orderRow.id,
+          product_id: l.productId,
+          quantity: l.quantity,
+          unit_price_cents: l.price,
+          product_title: l.title,
+        })),
+      )
+    })
+
+    res.status(201).json(order)
   }),
 )
 

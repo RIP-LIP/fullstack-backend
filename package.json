@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "dev:api": "npm run dev --workspace @fullstack/api",
-    "test": "tsx --test apps/api/test/api.test.ts apps/api/test/products.test.ts apps/api/test/foreign-key.test.ts apps/api/test/money.test.ts apps/api/test/migrate.test.ts apps/api/test/expand.test.ts apps/api/test/orders.test.ts apps/api/test/transaction.test.ts",
+    "test": "tsx --test apps/api/test/api.test.ts apps/api/test/products.test.ts apps/api/test/foreign-key.test.ts apps/api/test/money.test.ts apps/api/test/migrate.test.ts apps/api/test/expand.test.ts apps/api/test/orders.test.ts apps/api/test/transaction.test.ts packages/shared/test/schema.test.ts",
     "typecheck": "tsc --build apps/api packages/shared tsconfig.scripts.json",
     "check:encoding": "node scripts/check-encoding.mjs",
     "verify": "npm run typecheck && npm run check:encoding && npm run test",

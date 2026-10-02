@@ -85,10 +85,13 @@ apps/api/
   test/expand.test.ts        双读双写与回填
   test/orders.test.ts        订单接口与状态机
   test/transaction.test.ts   事务边界（并发请求的写入不会被吞）
-packages/shared/             Zod schema 与共享类型
+packages/shared/
+  src/index.ts               Zod schema 与共享类型
+  test/schema.test.ts        入参校验规则的单元测试
 scripts/
   verify-tag.mjs             tag 级复现
   backfill.mjs               分批回填（幂等 + 可中断）
+  probe.mjs                  事务那一章的实验，外加一条只读查库命令
   check-encoding.mjs         乱码检查
 docker-compose.yml           PostgreSQL
 ```
@@ -127,6 +130,30 @@ node scripts/backfill.mjs --batch=1000  # 分批补，每批一个事务
 ```
 
 幂等、可中断。**每批跑完会核对「剩余数真的少了」，没少就报错停下**——批处理最坏的失败不是报错，是不报错也不推进。
+
+## 查库
+
+本机不一定装了 `sqlite3` 命令行，所以给一条能直接复制的：
+
+```bash
+node scripts/probe.mjs state
+```
+
+**只读**开发库，把四张表现在有几行、内容是什么打出来。想看别的库就带 `DB_PATH`：
+
+```bash
+DB_PATH=/tmp/somewhere/test.db node scripts/probe.mjs state
+```
+
+同一个脚本还有三个实验，都是内存库，不碰开发数据：
+
+```bash
+node scripts/probe.mjs            # 全部跑一遍
+node scripts/probe.mjs notx       # 不用事务的半套数据
+node scripts/probe.mjs rollback   # 回滚失败会顶替原始错误
+node scripts/probe.mjs nested     # 嵌套 BEGIN 的报错来自 SQLite
+node scripts/probe.mjs check      # CHECK 只管值域，不管转移
+```
 
 ## 类型检查
 
