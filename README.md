@@ -19,7 +19,7 @@ Node 版本下限不是拍脑袋定的。`node:sqlite` 在 v22.5.0 加入，但�
 
 ```bash
 npm install
-npm test          # 3 条集成测试
+npm test          # 35 条测试
 npm run dev:api   # 起服务，监听 3002
 ```
 
@@ -38,9 +38,17 @@ Content-Type: application/json; charset=utf-8
 
 端口是 3002。入门项目占 3001，所以两个服务可以同时开着。
 
-## 起数据库
+## 数据库
 
-当前基线还没有任何表，代码也不连数据库。compose 文件先摆在这儿，等讲 PostgreSQL 那章接上。
+用的是 SQLite，数据库文件是 `apps/api/data/app.db`，**起后端时自动建表**，不需要执行任何 SQL 命令。测试跑在临时目录上，不会碰到你开发库里的数据。
+
+开发库搞坏了就重置（**不可恢复**）：
+
+```bash
+npm run db:reset
+```
+
+PostgreSQL 的 compose 文件先摆在这儿，当前代码不连它：
 
 ```bash
 docker compose up -d        # 起库
@@ -54,15 +62,23 @@ docker compose down         # 停掉；加 -v 连数据卷一起删
 
 ```
 apps/api/
-  src/index.ts         入口，读端口、监听
-  src/app.ts           Express 组装，导出以便测试
-  src/config.ts        环境变量集中读
-  src/errors.ts        统一错误形状
-  test/api.test.ts     集成测试
-packages/shared/       Zod schema 与共享类型
+  src/index.ts               入口，读端口、监听
+  src/app.ts                 Express 组装，导出以便测试
+  src/config.ts              环境变量集中读
+  src/errors.ts              统一错误形状 + 数据库约束的识别
+  src/db/index.ts            数据访问层的接口（三个方法）
+  src/db/sqlite.ts           node:sqlite 实现，全项目唯一知道底层的地方
+  src/routes/products.ts     商品接口
+  src/routes/async-handler.ts 让 async 路由的错误能走到错误中间件
+  test/harness.ts            测试的公共启动逻辑
+  test/api.test.ts           错误形状
+  test/products.test.ts      商品接口
+  test/foreign-key.test.ts   外键约束
+  test/money.test.ts         金额为什么存整数分
+packages/shared/             Zod schema 与共享类型
 scripts/
-  verify-tag.mjs       tag 级复现
-docker-compose.yml     PostgreSQL
+  verify-tag.mjs             tag 级复现
+docker-compose.yml           PostgreSQL
 ```
 
 ## tag 与章节的对应
@@ -72,6 +88,7 @@ docker-compose.yml     PostgreSQL
 | tag | 对应章节 | 内容 |
 | --- | --- | --- |
 | `v0.0` | 无 | 立项基线：能跑、能测、能复现 |
+| `v1.0` | ch04 | 四张表、外键约束、金额存整数分 |
 
 `v0.0` 不对应任何一章，它代表「讲任何一章之前，仓库长这样」。
 

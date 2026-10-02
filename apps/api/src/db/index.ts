@@ -1,0 +1,38 @@
+/**
+ * 数据访问层的接口。
+ *
+ * 这个文件里没有任何实现，只有「后面所有代码能依赖什么」的约定。
+ * 有意只暴露三个方法：一个多行查询、一个单行查询、一个事务。
+ *
+ * 为什么这么少：这一层存在的唯一理由，是让「换一个数据库」这件事
+ * 变成只改一个文件（db/sqlite.ts）。如果它长出
+ * OrderRepository / ProductRepository，就变成了另一件事——
+ * 那是每个项目都要重新设计一次的抽象层，收益抵不上成本。
+ * 等真出现第二种数据访问需求时再加，那时才知道该长什么样。
+ *
+ * 三个方法全部返回 Promise，尽管 node:sqlite 是同步的。原因同样只有一个：
+ * 换 PostgreSQL 之后底层一定要异步（网络往返），而那时业务代码已经
+ * 全都写好了。如果现在就同步，将来改异步要动每一个 await 链。
+ *
+ * 代价要说清楚：把同步包成异步**不等于**解决了并发。当前是单进程单连接，
+ * 写入天然串行。async 只是接口形状，不是并发方案。
+ */
+
+/** 能绑进 SQL 占位符的值。和 node:sqlite 的支持范围一致。 */
+export type Param = string | number | bigint | null | Uint8Array
+
+export interface Db {
+  /** 返回多行。查不到就是空数组。写入语句用 RETURNING，靠它拿回新行。 */
+  query<T>(sql: string, params?: readonly Param[]): Promise<T[]>
+
+  /** 返回第一行，没有就是 undefined。 */
+  one<T>(sql: string, params?: readonly Param[]): Promise<T | undefined>
+
+  /**
+   * 在一个事务里跑 fn。抛错就回滚并把错误原样抛出去。
+   *
+   * 不支持嵌套：事务里再开事务会直接报错。这是刻意的——
+   * 嵌套事务的需求出现时，说明该重新划分边界，而不是加个计数器糊过去。
+   */
+  transaction<T>(fn: (tx: Db) => Promise<T>): Promise<T>
+}
