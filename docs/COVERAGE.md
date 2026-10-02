@@ -2,11 +2,11 @@
 
 这个文件是会话之间的交接依据。换一个会话接着做之前，先读它。
 
-最后更新：S3 完成时
+最后更新：S4 完成时
 
 ## 现在在哪
 
-S3（ch06 零停机变更）已完成。ch07 起未开始。
+S4（ch07 事务）已完成。ch08 起未开始。
 
 | 章节 | 主题 | tag | 状态 |
 | --- | --- | --- | --- |
@@ -14,7 +14,7 @@ S3（ch06 零停机变更）已完成。ch07 起未开始。
 | ch04 | 数据模型 | `v1.0` | 已完成 |
 | ch05 | 迁移 | `v1.1` | 已完成 |
 | ch06 | 零停机变更 | `v1.2` | 已完成 |
-| ch07 | 事务 | `v1.3` | 未开始 |
+| ch07 | 事务 | `v1.3` | 已完成 |
 | ch08 | 换 PostgreSQL | `v1.4` | 未开始 |
 | ch09 | 幂等 | `v1.5` | 未开始 |
 | ch10 | 认证与授权 | `v1.6` | 未开始 |
@@ -27,16 +27,17 @@ S3（ch06 零停机变更）已完成。ch07 起未开始。
 
 | 项 | 结果 |
 | --- | --- |
-| `npm run verify` | 退出 0（typecheck + **56 tests** / 0 fail，ch06 前是 47） |
-| `node scripts/verify-tag.mjs v1.2` | 走完八步，56 tests 全跑，**本章检查 5/5**，退出 0 |
-| `node scripts/verify-tag.mjs v1.0` / `v1.1` | 退出 0，各跑当时时点的测试数（35 / 47） |
-| 手册 `npm run verify` | 22 页 593 条站内链接（54 锚点）全部有效 |
-| 三页新文章节 | 200；桌面与窄屏两档都正常 |
-| 计划性/自标榜字样 | ch04 / ch05 / ch06 均为 0 |
+| `npm run verify` | 退出 0（typecheck + 乱码 + **81 tests** / 0 fail，ch07 前是 56） |
+| `node scripts/verify-tag.mjs v1.3` | 走完八步，81 tests 全跑，**本章检查 6/6**，退出 0 |
+| `node scripts/verify-tag.mjs v1.0` / `v1.1` / `v1.2` | 全部退出 0。**改了 `sqlite.ts` 之后必须重跑这三个**，它们也走 `transaction` |
+| 手册 `npm run verify` | **23 页** 631 条站内链接（54 锚点）全部有效 |
+| 四页新文章节 | 200；桌面与窄屏两档都正常 |
+| 计划性/自标榜字样 | ch04–ch07 均为 0（`待写/待补/未来的/ch0[8-9]/ch1[0-9]` 全扫过） |
+| U+FFFD 乱码 | 两仓各加了一道检查，插入即 exit 1、恢复即 exit 0 |
 
 ## 审查记录
 
-这一组不是一次写完的。中间做过一次**产出审查**，下面是结论。
+这一组不是一次写完的。S2、S3、S4 各做过一次产出审查。
 
 ### S2 审查（针对 ch04 + ch05）
 
@@ -64,82 +65,198 @@ S3（ch06 零停机变更）已完成。ch07 起未开始。
 | V1 | ch04 §2 接口表只列成功码 | 加「可能失败时」列 |
 | L4 | `verify-out` 落在仓库根、`.verify-tmp` 是死条目 | outDir 挪进 `node_modules/.cache/`，删死条目 |
 
-**M2 那条还带出一个教训**：计划预测「去掉 asyncHandler 后请求挂住直到超时」，
-**实跑推翻了它**——实际是**整个进程退出**。详见下面的实跑证据段。
-**隐性规则这一类，不跑就没有准确描述。**
+**M2 那条带出一个教训**：计划预测「去掉 asyncHandler 后请求挂住直到超时」，
+**实跑推翻了它**——实际是**整个进程退出**。
 
 ### S3 自查（针对 ch06）
 
 交付前自己又查了两轮，抓到两个问题：
 
-1. **ch06 有一条断言是推的没验的。**「回填永远补不齐所有行」这句话，机制在
-   别处验过，但**那个顺序没跑过**。补跑了一遍完整序列（见下面的实跑证据段），
-   结论还比原来那句更硬。
-2. **COVERAGE 自己被我改出 5 段重复残留**（上一轮更新时只替换了开头、没删旧
-   版本），其中两段是**过期的**：旧的「载体状态」写着只有 2 个迁移 5 个测试
-   文件，旧的「下一步」写着「S3 做 ch06 + ch07」——S4 照着会被带偏。已去重。
+1. **ch06 有一条断言是推的没验的。**「回填永远补不齐所有行」这句话，
+   机制在别处验过，但**那个顺序没跑过**。补跑了一遍完整序列，结论还比原来那句更硬。
+2. **COVERAGE 自己被改出 5 段重复残留**，其中两段是过期的。已去重。
 
-> 由此加进硬约束：**改交接文档时，替换完要数一遍标题，确认没有残留。**
-> 交接文档最容易出的不是「没写」，是「改了开头忘了删旧的」。
+由此加进硬约束：**改交接文档时，替换完要数一遍标题，确认没有残留。**
 
-## ch06 实跑确认的事实
+### S4 审查（针对 ch04–ch06 的全部产物）
 
-### JSON.stringify 会删掉值为 undefined 的键
+**这次审出的是真缺陷，不是风格问题。** 最重要的一条：
 
-直觉做法 `ALTER TABLE ... RENAME COLUMN name TO title` 跑完之后，老代码 `row.name` 是 `undefined`，响应里 `name` **整个键消失**——不报错、不警告：
+> **`Db.transaction` 的原子性不成立。**
+> `BEGIN` 之后 `await fn(db)` 把控制权交回事件循环，
+> 别的请求的写语句会执行在这个事务里，跟着它一起回滚。
+> 那个请求拿到 200，数据没了，全程无异常。
+
+已修（`withConnection` 占用门 + `AsyncLocalStorage` 归属标记），
+并且 `transaction.test.ts` 是它的回归守卫。**详见下面「ch07 实跑确认的事实」。**
+
+审出 14 项，全部已修。分类：
+
+| 类别 | 条数 | 代表 |
+| --- | :-: | --- |
+| 真缺陷（数据正确性） | 1 | 事务原子性是假的 |
+| 真缺陷（错误语义） | 2 | `ROLLBACK` 失败顶替原始错误；嵌套靠 SQLite 报错 |
+| 事实错误 | 2 | `async-handler` 注释还写着「请求挂住」；README 测试条数 47（实际 56） |
+| 乱码 | 3 | `ch03.md:180`、`ch06.md:553`、`toolkit/design.md:161` |
+| 重复段落 | 2 | `ch06.md` 结尾两段逐字重复；COVERAGE 的重复块（S3 自称已去重，实际没去干净） |
+| 覆盖缺失 | 2 | 工具选型几乎空白（用户明确要求，三章合计只有 1 行提到 ORM） |
+| 计划字样 | 2 | 「未来的 004」「ch11 会…后面 9 章」 |
+
+**这一轮也暴露了一个模式**：三次审查里，有两次抓到的重复段落
+都出现在**「改了开头没删旧的」**这个位置。COVERAGE 和 ch06 各中一次。
+所以硬约束那条现在扩展成：**改任何长文档，改完数一遍标题，逐段对照旧版。**
+
+## ch07 实跑确认的事实
+
+以下每条都附了本会话跑出来的命令和实际输出。要复现就直接复制命令。
+
+### 事务的原子性来自「不让出事件循环」，不是来自 BEGIN/COMMIT
+
+2×2 对照（两种实现 × 两种事务体）：
+
+| 实现 | 事务体里 await 什么 | 另一个请求的结果 | 它写的行 |
+| --- | --- | --- | --- |
+| 没有门 | 只 await 同步查询 | `fulfilled` | 还在 |
+| 没有门 | **await 定时器** | `fulfilled` | **没了** |
+| 加了门 | 只 await 同步查询 | `fulfilled` | 还在 |
+| 加了门 | await 定时器 | `fulfilled` | 还在 |
+
+只有第二行是故障点。**为什么第一种情况没事**：
+`await` 一个已 resolve 的 Promise 产生的只是**微任务**，微任务队列会被排空，
+而 Node 处理下一个 HTTP 请求需要**宏任务**。所以「只 await 数据库查询」
+的链路上事件循环插不进来。
+
+**这就是 `migrate.ts` 今天没出事的原因**，也仅限于这个原因。
+
+### 数据静默丢失的完整现场
 
 ```
-映射对象里 name 的值: undefined
-序列化后: {"id":1,"sku":"KB-87","priceCents":39900,"stock":25,"createdAt":"..."}
+事务这一侧: rejected - 这一步失败了
+另一个请求: fulfilled   <- 它成功了
+
+=== 事务回滚之后（只读）===
+另一个请求写的那一行还在吗: 没了
+它拿到的响应是: 200 / 成功
+服务端日志: 没有任何异常
 ```
 
-**两种「静默」不一样，别混**：
+### 回滚失败会顶替原始错误
 
-| 情况 | 映射结果 | JSON 里 |
+```bash
+node -e "
+const {DatabaseSync}=require('node:sqlite');
+const d=new DatabaseSync(':memory:');
+d.exec('BEGIN'); d.exec('ROLLBACK');
+try { d.exec('ROLLBACK'); console.log('空 ROLLBACK: 没报错'); }
+catch(e){ console.log('空 ROLLBACK ->', e.message); }
+d.exec('BEGIN'); d.exec('COMMIT');
+try { d.exec('ROLLBACK'); console.log('COMMIT 后 ROLLBACK: 没报错'); }
+catch(e){ console.log('COMMIT 后 ROLLBACK ->', e.message); }
+"
+```
+
+```
+空 ROLLBACK -> cannot rollback - no transaction is active
+COMMIT 后 ROLLBACK -> cannot rollback - no transaction is active
+```
+
+不单独 try/catch 的话，这句会顶替掉本该给客户端的 409 `OUT_OF_STOCK`。
+
+### 嵌套事务原来不是守卫
+
+```bash
+node -e "
+const {DatabaseSync}=require('node:sqlite');
+const d=new DatabaseSync(':memory:');
+d.exec('BEGIN');
+try { d.exec('BEGIN'); console.log('嵌套 BEGIN: 没报错'); }
+catch(e){ console.log('嵌套 BEGIN ->', e.message); }
+"
+```
+
+```
+嵌套 BEGIN -> cannot start a transaction within a transaction
+```
+
+**报错来自 SQLite，不是代码。** 现在换成 `NestedTransactionError`。
+
+### CHECK 只管值域，不管转移
+
+```bash
+node -e "
+const {DatabaseSync}=require('node:sqlite');
+const d=new DatabaseSync(':memory:');
+d.exec(\"CREATE TABLE orders (id INTEGER PRIMARY KEY, status TEXT NOT NULL CHECK (status IN ('pending','paid','shipped','completed','cancelled'))\");
+d.prepare('INSERT INTO orders (status) VALUES (?)').run('cancelled');
+const r=d.prepare(\"UPDATE orders SET status='paid' WHERE id=1\").run();
+console.log('cancelled 改成 paid，changes =', r.changes, ' <- 库接受了');
+try { d.prepare(\"UPDATE orders SET status='refunded' WHERE id=1\").run(); }
+catch(e){ console.log('改成 refunded ->', e.code); }
+"
+```
+
+```
+cancelled 改成 paid，changes = 1  <- 库接受了
+改成 refunded -> ERR_SQLITE_ERROR
+```
+
+**一个 cancelled 的订单被直接改成 paid，库照收不误。**
+改成 `refunded` 会被拦住，因为它不在枚举里——**值域和转移是两件事**，
+`CHECK` 只管前者，转移必须在代码里判。
+
+### 不用事务的半套数据
+
+```
+第 1 步：orders 建好了，id = 2
+第 2 步：order_items 写了 1 行
+第 3 步：甲的库存扣了 3，changes = 1
+第 4 步：乙库存不足，changes = 0  <- 这一步失败了
+
+=== 现在库里是什么状态（只读）===
+订单 2 存在: true
+它的明细行数: 1 （这一单要 2 行）
+甲的库存: 7 （下单前 10，这一单要买 3 件）
+甲的库存和订单对得上吗: 对得上
+```
+
+**订单存在，明细缺一行。** 而且第 4 步**没有抛异常**——
+`UPDATE ... WHERE stock >= 50` 匹配不到行，语句成功执行、0 行受影响。
+
+## 载体状态
+
+```
+apps/api/src/db/index.ts       Db 接口（query / one / transaction 三个方法）
+apps/api/src/db/sqlite.ts      node:sqlite 实现 + withConnection 占用门 + NestedTransactionError
+apps/api/src/db/migrate.ts     迁移执行器（版本表 + checksum + 每迁移一事务）
+apps/api/src/db/migrations/    001_init / 002_add_product_description / 003_add_product_title
+apps/api/src/routes/           products.ts、orders.ts、async-handler.ts
+apps/api/src/order-state.ts    订单状态机转移表（独立于路由，可单独测）
+apps/api/test/                 harness.ts + 8 个测试文件
+scripts/backfill.mjs           ch06 的分批回填
+scripts/verify-tag.mjs         tag 级复现 + 每章的 CHAPTER_CHECKS
+scripts/check-encoding.mjs     乱码检查
+```
+
+`products` 表现在 8 列：`id / sku / name / title / price_cents / stock / created_at / description`。
+`name` 和 `title` 并存是**故意的**——expand 阶段不删任何东西。
+
+### 订单接口的形状
+
+| 接口 | 成功 | 可能失败 |
 | --- | --- | --- |
-| 列还在，值是 NULL | `null` | `"name":null`，键在，看得出不对 |
-| 列被改名/删掉 | `undefined` | **键整个消失**，看不出少了东西 |
+| `POST /api/orders` | 201 | 400 `VALIDATION_FAILED` / 404 `PRODUCT_NOT_FOUND` / 404 `USER_NOT_FOUND` / 409 `OUT_OF_STOCK` |
+| `GET /api/orders/:id` | 200 | 404 `ORDER_NOT_FOUND` / 400 `INVALID_PARAM` |
+| `POST /api/orders/:id/transition` | 200 | 404 `ORDER_NOT_FOUND` / 409 `ORDER_STATE_INVALID` / 400 `VALIDATION_FAILED` |
 
-双读的 `?? row.name` 只能守第一种；第二种靠的是**别去改列名**。
+状态机转移表：
 
-**「两个版本同时对着一个库」的实测输出**（v1.1 导出到临时目录，`DB_PATH` 指向同一个
-`app.db`，两个端口同时跑）：
-
-```
-v1.2 读 -> {"id":1,"sku":"OLD-1","name":"老商品1","title":"老商品1",...}
-v1.1 读 -> {"id":1,"sku":"OLD-1","name":"老商品1",...}        没有 title 键
-v1.1 写 -> 库里那一行 title 是 null
-v1.2 读 -> {"id":25,...,"title":"老版本写的",...}            ?? 兜住了
-```
-
-**「回填归零」这个前提在老版本还在跑的时候不成立**（完整顺序跑过一遍）：
-
-```
-1. 造 3 行老数据 -> 回填补完 -> title IS NULL = 0
-2. 老版本写一条   -> title IS NULL = 1   又回来了
-3. 新版本读它     -> title 依然正确，靠 ??
-```
-
-所以 contract 的前提是「**老版本不会再被部署**」，不是「某一时刻回填归零」。
-这两个看着像，差得很远——拿前者当前者用，删列之后老版本一写就是生产事故。
-
-**回填脚本踩的两个坑（都是「不报错也不干活」）**：
-
-1. `db.exec()` **不接受绑定参数**。用 `exec()` 跑 `... IN (?,?,?)`，那些问号是未绑定的
-   占位符，值全为 NULL，`id IN (NULL,NULL,NULL)` 匹配不到任何行。语句成功执行、0 行受影响、
-   无异常。换成 `prepare().run(...ids)` 立刻 `changes = 1`。实测：
-   ```
-   用 exec() 跑完（不传参）后: 0 ← 仍然是 0，语句没报错但一行没改
-   用 prepare().run(3) 后: 1  changes = 1
-   ```
-2. **批处理没有「有没有真的推进」的检查**，剩余数不降就无限转，日志刷了 300 多行。
-   已加进度守卫：每批核对剩余数真的少了，没少就报错停下。**批处理最坏的失败不是报错，
-   是不报错也不推进。** 这条对任何批处理脚本都成立。
-
-修好后每批 10 行：10 → 剩 13 → 剩 3 → 剩 0，共 3 批；再跑一遍 0 批 0 改动 0 补错。
-
-**ch05 留下的 ADD COLUMN 边界现在派上用场了**：003 加 `title` 用的就是可空列，
-正因为 002 的注释里记着「有行表上加 NOT NULL 无默认值会失败」。
+| 从 | 可以到 |
+| --- | --- |
+| `pending` | `paid`、`cancelled` |
+| `paid` | `shipped`、`cancelled` |
+| `shipped` | `completed` |
+| `completed` | （终态） |
+| `cancelled` | （终态） |
 
 ## 变异测试记录
 
@@ -148,67 +265,59 @@ v1.2 读 -> {"id":25,...,"title":"老版本写的",...}            ?? 兜住了
 | ch04 | 去掉 DELETE 里的外键 409 翻译 | 1 条：删一个已经被订单引用的商品，返回 409 而不是 500 |
 | ch04 | `rowToProduct` 里 `price_cents` 除以 100 | 3 条 |
 | ch05 | 关掉迁移的 checksum 校验 | 2 条 |
-| **ch06** | **双读里的 `?? row.name` 去掉** | **1 条**：老数据 title 退回 name |
-| **ch06** | **`INSERT` 少写 `title` 一列** | **3 条**：双写两条 + 老代码视角一条 |
+| ch06 | 双读里的 `?? row.name` 去掉 | 1 条：老数据 title 退回 name |
+| ch06 | `INSERT` 少写 `title` 一列 | 3 条：双写两条 + 老代码视角一条 |
+| **ch07** | **去掉 `withConnection` 的排队** | **1 条**：并发请求的写入不会被事务回滚吞掉 |
+| **ch07** | **转移表里 `completed` 加上 `paid`** | **2 条**：终态没有任何出边 + 转移表和接口表现一致 |
+| **ch07** | **转移表里 `pending` 加上 `completed`** | **1 条**：非法转移不写库，状态保持原样 |
 
-**ch06 两次抓到的用例不重叠**，说明双读和双写各自被独立守住，不是同一批断言在空转。
+**ch07 三次抓到的用例不重叠**，说明三处规则各自被独立守着。
 
-## 载体状态
+**ch07 的变异测试还抓出了自己的覆盖缺口**：
+第二次变异（`completed` 加 `paid`）最初只被纯逻辑那条抓住，
+接口层没有对应断言——因为没有任何 HTTP 测试走 `completed → paid`。
+补上之后两个变异都能被接口层抓到。
 
-```
-apps/api/src/db/index.ts       Db 接口（query / one / transaction 三个方法）
-apps/api/src/db/sqlite.ts     node:sqlite 实现 + createDb 工厂 + 模块顶层 await migrate
-apps/api/src/db/migrate.ts    迁移执行器（版本表 + checksum + 每迁移一事务）
-apps/api/src/db/migrations/   001_init / 002_add_product_description / 003_add_product_title
-apps/api/src/routes/          products.ts、async-handler.ts
-apps/api/test/                harness.ts + 6 个测试文件
-scripts/backfill.mjs          ch06 的分批回填（幂等 + 可中断 + 进度守卫）
-```
+## 下一步：S5 做 ch08 换 PostgreSQL
 
-`products` 表现在 8 列：`id / sku / name / title / price_cents / stock / created_at / description`。
-`name` 和 `title` 并存是**故意的**——expand 阶段不删任何东西。
+### 这一章的转折点
 
-`migrate.test.ts` 里断言迁移条数的那条**已改成对着 `allMigrations.length` 比**，
-不再写死数字。以后加迁移不会再因为「条数变了」而红一次。
+ch04 那层只暴露三个方法，就是为了这一天。**换库时业务代码应该一行不改**，
+改的只有 `db/sqlite.ts` 这一个文件。
 
-## 下一步：S4 做 ch07 事务
+**兑现 ch02 原文承诺**：「SQLite 代价什么时候不可接受，讲换数据库那篇会讲」。
 
-ch07 要处理「建订单同时动三张表」。`Db.transaction` 已经在 `sqlite.ts` 里实现好了，直接用。
+### S5 的起点
 
-**载体上要注意的**：`orders` 和 `order_items` 两张表建了但**没有接口**（ch04 只做了
-products）。ch07 得先把建订单的路径写出来。
+1. `docker compose up -d`，`docker compose ps` 看到 healthy 才算好。
+   `postgres:17-alpine` 镜像本机已确认能拉下来（exit 0）。
+   **本机没有装 PostgreSQL，5432 无监听**——必须用 Docker。
+   这条命令**会新建容器**，不碰你机器上已有的任何容器。
+2. 选驱动（**本轮未决，S5 决定**）：`pg` 8.23.1 还是 `postgres.js`。
+   `node_modules` 里目前**没有** `pg`，要新装。
+3. 新建 `db/postgres.ts`，实现同样的三个方法。
+4. **不需要新迁移**：PostgreSQL 兼容 SQLite 的大部分 SQL，
+   但 `AUTOINCREMENT`、`TEXT NOT NULL` 之外的细节要逐条验。
 
-订单状态机的取值域已被 `CHECK` 钉住（`pending` / `paid` / `shipped` / `completed` /
-`cancelled`），但**转移规则还没实现**——那是 ch07 的核心内容。
+### 换库时一定会踩的坑（S5 验一遍再写）
 
-### ch07 的量要重新估
+- **`withConnection` 那道门要删掉。** PostgreSQL 的连接池会保证
+  一个事务独占一条连接，事务归属不再是「一个进程只有一条连接」那个前提。
+  留着它只会让所有查询排队到池里。
+- **`AUTOINCREMENT` 在 PostgreSQL 里不存在**，对应的是 `SERIAL` / `IDENTITY`。
+- **大小写**：PostgreSQL 会把未加引号的标识符转成小写。
+  `order_items` 这种全小写没事，`unitPriceCents` 这种驼峰会找不到列。
+- **`RETURNING` 两边都支持**，这一点不用改。
+- **金额仍是整数分**，这条不随数据库变。
 
-ch06 是「加一列 + 改几处映射 + 写一个脚本」，代码改动集中在两个文件。
-**ch07 要新建订单接口 + 状态机转移规则 + 三表事务边界 + 对应的测试文件**，
-量大概是 ch06 的两到三倍。
+### ch08 的量
 
-**如果 S4 还想一次做两章，很可能又得中途切。** 切的时候照旧：
-`v1.3` 正常提交 + `verify-tag` 验过 + 写完文档，**别为了「一次做完」跳过验证**。
-S2 审查报告里已经因为这个原因重做过一次。
+比 ch07 小。核心工作是「写 `db/postgres.ts` + 证明业务代码没改」，
+再补上**换库后才出现的那几个问题**（连接池耗尽、`LIMIT` 的执行计划、
+`SERIAL` 的序列）。不需要新写接口。
 
-### 查过了，不用再查的两件事
-
-1. **`migrate.test.ts` 里那条写死列名的断言是安全的。** 它显式只跑
-   `migrate(db, [m001, m002])`，不经过 `allMigrations`，所以加 004 不会弄红它。
-   （另一条断言条数的已经改成对着 `allMigrations.length` 比，S2 就修过了。）
-
-2. **`Product` 这个 zod schema 从来没被用来校验响应体**，只是类型。
-   `rowToProduct` 返回的对象直接 `res.json()`。所以给 `Product` 加字段不会
-   引发「响应和 schema 对不上」的报错——但也意味着**它现在没有运行时保护力**，
-   ch07 之后要不要真的拿它校验响应，是可以单独决定的一件事。
-
-### ch07 大概会踩的坑（提前记下，动手时验一遍）
-
-- **嵌套事务**：`sqlite.ts` 的 `transaction` 不支持嵌套（事务套事务会直接报错），
-  这是刻意的。ch07 如果需要分层，先看清楚这一点再决定边界画在哪。
-- **事务里不要做 IO**：发邮件、发消息、调第三方 HTTP 圈进事务，会让事务从毫秒
-  变秒，锁一直占着。ch07 的三张表都是本地写库，没有这个问题，但写示例时别顺手
-  加一个「同时发个通知」。
+**注意**：ch07 的 `transaction.test.ts` 里那些并发断言，
+在换库之后**要重新验一遍**——它们守的性质不变，但实现机制完全不同了。
 
 ## 硬约束
 
@@ -219,27 +328,27 @@ S2 审查报告里已经因为这个原因重做过一次。
 - `config.ts` 只放代码真的读到的键
 - 数据访问层不按实体建 repository
 - 文档不写「待写 / 待补 / 还没写」，不写「我们只讲 X 不讲 Y」这类句子
+- **文档不引用还没写的章节**（`ch08` 及以后）。范围没覆盖到的地方就不提
 - 文档里的每条命令标明是否改动数据
 - `::: request` 容器里的响应必须实跑抓取，不能凭印象写
 - **文档里举的每个例子都要实跑确认过**。会错和不会错的例子要分开写清楚
-- **交接文档里的行为断言要带本会话跑出来的命令和输出**
+- **工具选型每条都要给「不选它的理由」和「什么信号出现时该换」**，只列库名不算
+- 交接文档里的行为断言要带本会话跑出来的命令和输出
+- **改任何长文档，改完数一遍标题，逐段对照旧版**（三次审查里有两次栽在这）
 - 每章收尾做变异测试，把挂掉的用例名写进 commit message
 - 加测试文件后要改根 `package.json` 的 `test` 脚本（显式列文件名），
   并确认 `npm test` 的**测试条数涨了**。没涨就是没跑到
+- **改了 `db/sqlite.ts` 之后，`verify-tag` 四个 tag 全部重跑**，
+  它们都走 `transaction`
 - **commit message 里不要出现双引号**——PowerShell 会把它截断，git 收到乱参数。
   写进文件用 `git commit -F 文件`，文件也**别放在仓库里**（会被 `git add -A` 带进去），
   放 `%TEMP%`
+- 仓库根不要留日志文件。它们被 `.gitignore` 挡住所以 `git status` 看不出来，
+  但下一个会话会误读成产物
 
-## 本机实跑确认的事实（写文档直接用，别再自己猜）
+## 前三个会话留下的、本会话原样保留的事实
 
-> 每条都附了**实跑出来的命令和实际输出**。要复现就复制命令跑一遍。
->
-> 上一版这里只给结论不给命令，违反了本文档自己的规矩（见「硬约束」最后几条），
-> 结果下一个会话得重新推导一遍才能确认。
-
-> 本节每一条都附了**本会话跑出来的命令和实际输出**。要复现就直接复制命令跑一遍。
-> 上一版这里只给结论不给命令，违反了本文档自己的规矩（见「硬约束」最后两条），
-> 结果是下一个会话得重新推导一遍才能确认。新版补上命令。
+> 每条都附了实跑出来的命令和实际输出。要复现就复制命令跑一遍。
 
 ### 外键默认是开的
 
@@ -256,44 +365,9 @@ console.log('显式关掉:', JSON.stringify(b.prepare('PRAGMA foreign_keys').get
 显式关掉: {"foreign_keys":0}
 ```
 
-`@types/node` 的 `sqlite.d.ts` 里也标着 `@default true`（`enableForeignKeyConstraints` 字段上方）。
-
 **所以「SQLite 默认关外键」是错的**，会把读者引去查一个不存在的问题。
-
-显式关掉之后，删父行会留下孤儿行**且不报错**：
-
-```bash
-node -e "const {DatabaseSync}=require('node:sqlite');
-const b=new DatabaseSync(':memory:',{enableForeignKeyConstraints:false});
-b.exec('CREATE TABLE p(id INTEGER PRIMARY KEY)');
-b.exec('CREATE TABLE c(id INTEGER PRIMARY KEY, pid INTEGER REFERENCES p(id))');
-b.prepare('INSERT INTO p VALUES (1)').run();
-b.prepare('INSERT INTO c VALUES (1,1)').run();
-b.exec('DELETE FROM p WHERE id=1');
-console.log('子行还在:', b.prepare('SELECT COUNT(*) AS n FROM c').get().n);"
-```
-
-```
-子行还在: 1
-```
-
-事务内设置静默无效：
-
-```bash
-node -e "const {DatabaseSync}=require('node:sqlite');
-const d=new DatabaseSync(':memory:',{enableForeignKeyConstraints:false});
-d.prepare('PRAGMA foreign_keys = OFF').run();
-d.exec('BEGIN');
-d.prepare('PRAGMA foreign_keys = ON').run();
-console.log('事务内设 ON 之后:', JSON.stringify(d.prepare('PRAGMA foreign_keys').get()));
-d.exec('ROLLBACK');"
-```
-
-```
-事务内设 ON 之后: {"foreign_keys":0}
-```
-
-开着的状态下，有子行时删父行 → `errcode: 787`（`SQLITE_CONSTRAINT_FOREIGNKEY`），ch04 的 409 就是从它翻译出来的。
+显式设 `ON` 仍然该做，真实理由是三条：pragma **按连接**生效；
+**事务内设置静默无效**；换客户端默认值不保证相同。
 
 ### ADD COLUMN 的边界
 
@@ -304,9 +378,6 @@ d.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, title TEXT)');
 d.prepare('INSERT INTO t (title) VALUES (?)').run('有一条数据');
 try { d.exec('ALTER TABLE t ADD COLUMN owner TEXT NOT NULL'); console.log('有行+无默认值: 成功'); }
 catch(e){ console.log('有行+无默认值: 失败 ->', e.message); }
-try { d.exec('ALTER TABLE t ADD COLUMN owner TEXT NOT NULL DEFAULT \'\'');
-      console.log('有行+有默认值:', JSON.stringify(d.prepare('PRAGMA table_info(t)').all().map(r=>r.name))); }
-catch(e){ console.log('有行+有默认值: 失败 ->', e.message); }
 const e2=new DatabaseSync(':memory:');
 e2.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, title TEXT)');
 e2.exec('ALTER TABLE t ADD COLUMN owner TEXT NOT NULL');
@@ -315,11 +386,11 @@ console.log('空表+无默认值: 成功');"
 
 ```
 有行+无默认值: 失败 -> Cannot add a NOT NULL column with default value NULL
-有行+有默认值: ["id","title","owner"]
 空表+无默认值: 成功
 ```
 
 **「能不能加」取决于表里有没有数据，不是语法允不允许。**
+ch06 的 003 迁移用的就是可空列，正是因为这条。
 
 ### CREATE TABLE IF NOT EXISTS 不管表长什么样
 
@@ -328,16 +399,12 @@ node -e "const {DatabaseSync}=require('node:sqlite');
 const d=new DatabaseSync(':memory:');
 d.exec('CREATE TABLE products (id INTEGER PRIMARY KEY, sku TEXT)');
 d.prepare('INSERT INTO products (sku) VALUES (?)').run('OLD-1');
-console.log('老库的列:', JSON.stringify(d.prepare('PRAGMA table_info(products)').all().map(r=>r.name)));
-d.exec('CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY, sku TEXT, name TEXT, price_cents INTEGER)');
-console.log('重跑之后:', JSON.stringify(d.prepare('PRAGMA table_info(products)').all().map(r=>r.name)));
-console.log('表里的行:', JSON.stringify(d.prepare('SELECT * FROM products').all()));"
+d.exec('CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY, sku TEXT, name TEXT)');
+console.log('重跑之后的列:', JSON.stringify(d.prepare('PRAGMA table_info(products)').all().map(r=>r.name)));"
 ```
 
 ```
-老库的列: ["id","sku"]
-重跑之后: ["id","sku"]
-表里的行: [{"id":1,"sku":"OLD-1"}]
+重跑之后的列: ["id","sku"]
 ```
 
 **新加的列没有出现。** `IF NOT EXISTS` 只判断「这张表在不在」。
@@ -357,39 +424,21 @@ console.log('回滚后表数:', d.prepare('SELECT COUNT(*) AS n FROM sqlite_mast
 回滚后表数: 0
 ```
 
-两个推论：
-
-- 「每个迁移一个事务」成立——执行到一半失败不会留下建了一半的表
-- DDL 走 `prepare().all()` 正常，所以数据层只要 `query` / `one` / `transaction` 三个方法就够，**不需要第四个**
+两个推论：「每个迁移一个事务」成立；DDL 走 `prepare().all()` 正常，
+所以数据层只要 `query` / `one` / `transaction` 三个方法就够。
 
 ### 浮点：会错的
 
 ```bash
 node -e "console.log('0.1+0.2  =', 0.1+0.2);
 console.log('8.2*3    =', 8.2*3);
-console.log('4.35*100 =', 4.35*100);
-console.log('1.005*100=', 1.005*100);"
+console.log('4.35*100 =', 4.35*100);"
 ```
 
 ```
 0.1+0.2  = 0.30000000000000004
 8.2*3    = 24.599999999999998
 4.35*100 = 434.99999999999994
-1.005*100= 100.49999999999999
-```
-
-存进 SQLite 的 REAL 列也是同一个值：
-
-```bash
-node -e "const {DatabaseSync}=require('node:sqlite');
-const d=new DatabaseSync(':memory:');
-d.exec('CREATE TABLE t(v REAL)');
-d.prepare('INSERT INTO t VALUES (?)').run(8.2*3);
-console.log('REAL 列读回来:', d.prepare('SELECT v FROM t').get().v);"
-```
-
-```
-REAL 列读回来: 24.599999999999998
 ```
 
 ### 浮点：不会错的，别拿去举例
@@ -398,8 +447,7 @@ REAL 列读回来: 24.599999999999998
 node -e "console.log('0.999+1.5+0.501 =', 0.999+1.5+0.501);
 console.log('19.99*3          =', 19.99*3);
 console.log('9.99+0.01        =', 9.99+0.01);
-console.log('29.9+10.1        =', 29.9+10.1);
-console.log('1234.56+0.44     =', 1234.56+0.44);"
+console.log('29.9+10.1        =', 29.9+10.1);"
 ```
 
 ```
@@ -407,18 +455,16 @@ console.log('1234.56+0.44     =', 1234.56+0.44);"
 19.99*3          = 59.97
 9.99+0.01        = 10
 29.9+10.1        = 40
-1234.56+0.44     = 1235
 ```
 
-**这五个全是精确的。** S2 就因为随手挑了 `0.999 + 1.5 + 0.501` 当反例，测试直接挂了一条。
-写教程或报告时最容易出的错就是「随手挑几个数」说明浮点有问题——挑到不会错的那组，整段话就废了。
+**这四个全是精确的。** S2 就因为随手挑了 `0.999 + 1.5 + 0.501` 当反例，
+测试直接挂了一条。**随手挑几个数说明浮点有问题，挑到不会错的那组整段话就废了。**
 
-### 没有 asyncHandler 会怎样（ch04 用）
+### 没有 asyncHandler 会怎样
 
-**不是「请求挂住」，是整个进程退出。** 本会话实跑确认：
+**不是「请求挂住」，是整个进程退出。**
 
 ```bash
-# 正常：包着 asyncHandler
 curl -i --max-time 5 http://localhost:3002/api/products/1.5
 ```
 
@@ -427,27 +473,25 @@ HTTP/1.1 400 Bad Request
 {"error":{"code":"INVALID_PARAM","message":"id 必须是正整数"}}
 ```
 
-22 毫秒返回，服务继续跑。**把那一处的 `asyncHandler(...)` 拆掉，其余不动**，同一条命令：
+22 毫秒返回。**把那一处的 `asyncHandler(...)` 拆掉，其余不动**，同一条命令：
 
 ```
 HTTP 000  耗时 0.031s
 ```
 
-`000` 是 curl 的说法：连接被关掉了，一个字节都没收到。随后 `curl /api/health` 也是 `000`，Node 进程已经不在了：
+`000` 是 curl 的说法：连接被关掉了，一个字节都没收到。随后 health 也是 `000`，
+Node 进程已经不在了。Express 4 不等 async 路由返回的 Promise，
+`throw` 变成 unhandled rejection，Node 15 之后默认让进程退出。
 
-```
-HttpError: id 必须是正整数
-    at parseId (apps/api/src/routes/products.ts:54:11)
-    at <anonymous> (apps/api/src/routes/products.ts:73:16)
-  status: 400,
-  code: 'INVALID_PARAM',
-  fields: undefined
-}
+**一条非法参数请求打死整个服务，当时在处理的所有请求一起死。**
 
-Node.js v24.16.0
-```
+### 批处理脚本的进度守卫
 
-**一条非法参数请求打死整个服务，当时在处理的所有请求一起死。** Express 4 不等 async 路由返回的 Promise，`throw` 变成 unhandled rejection，Node 15 之后默认让进程退出。
+`db.exec()` **不接受绑定参数**。用 `exec()` 跑 `... IN (?,?,?)`，
+那些问号是未绑定的占位符，值全为 NULL，语句成功执行、0 行受影响、无异常。
+换成 `prepare().run(...ids)` 立刻 `changes = 1`。
 
-ch04 的计划里原本预测的是「请求挂住直到超时」。**实跑推翻了这个预测**，已按实跑结果写进文档。教训：隐性规则这一类，**不跑就没有准确描述**。
+而批处理的循环条件是 `while (total > 0)`——`total` 永远不降，于是**无限循环**。
+修法是每批跑完核对「剩余数真的少了」，没少就报错停下。
 
+**批处理最坏的失败不是报错，是不报错也不推进。** 这条对任何批处理脚本都成立。

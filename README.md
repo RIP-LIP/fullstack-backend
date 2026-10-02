@@ -19,7 +19,7 @@ Node 版本下限不是拍脑袋定的。`node:sqlite` 在 v22.5.0 加入，但�
 
 ```bash
 npm install
-npm test          # 56 条测试
+npm test          # 81 条测试
 npm run dev:api   # 起服务，监听 3002
 ```
 
@@ -73,6 +73,8 @@ apps/api/
   src/db/migrate.ts          迁移执行器
   src/db/migrations/         001_init、002_add_product_description、003_add_product_title
   src/routes/products.ts     商品接口
+  src/routes/orders.ts       订单接口
+  src/order-state.ts         订单状态机的转移表
   src/routes/async-handler.ts 让 async 路由的错误能走到错误中间件
   test/harness.ts            测试的公共启动逻辑
   test/api.test.ts           错误形状
@@ -81,6 +83,8 @@ apps/api/
   test/money.test.ts         金额为什么存整数分
   test/migrate.test.ts       迁移
   test/expand.test.ts        双读双写与回填
+  test/orders.test.ts        订单接口与状态机
+  test/transaction.test.ts   事务边界（并发请求的写入不会被吞）
 packages/shared/             Zod schema 与共享类型
 scripts/
   verify-tag.mjs             tag 级复现
@@ -99,6 +103,7 @@ docker-compose.yml           PostgreSQL
 | `v1.0` | ch04 | 四张表、外键约束、金额存整数分 | 5 条 |
 | `v1.1` | ch05 | 版本表、checksum、每个迁移一个事务 | 4 条 |
 | `v1.2` | ch06 | expand 阶段：加 title 列、双读双写 | 5 条 |
+| `v1.3` | ch07 | 订单接口、状态机、事务的连接归属 | 6 条 |
 
 `v0.0` 不对应任何一章，它代表「讲任何一章之前，仓库长这样」。
 
