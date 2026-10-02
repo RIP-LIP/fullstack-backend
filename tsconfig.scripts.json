@@ -5,7 +5,7 @@
     "checkJs": true,
     "noEmit": false,
     "allowImportingTsExtensions": false,
-    "outDir": "./verify-out"
+    "outDir": "./node_modules/.cache/typecheck"
   },
   "include": ["scripts/**/*.mjs"]
 }

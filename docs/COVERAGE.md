@@ -50,30 +50,219 @@ S2（ch04 数据模型 + ch05 迁移）已完成。ch06 起未开始。
 
 ## 本机实跑确认的事实（写文档直接用，别再自己猜）
 
-**外键**：`node:sqlite` 默认 `foreign_keys = 1`（开），`@types/node` 标 `@default true`。
-传 `enableForeignKeyConstraints: false` 才是 0，删父行后孤儿行静默留存。
-`PRAGMA foreign_keys = ON` 在事务内**静默无效**。有子行时删父行 → `errcode: 787`。
+> 本节每一条都附了**本会话跑出来的命令和实际输出**。要复现就直接复制命令跑一遍。
+> 上一版这里只给结论不给命令，违反了本文档自己的规矩（见「硬约束」最后两条），
+> 结果是下一个会话得重新推导一遍才能确认。新版补上命令。
 
-**ADD COLUMN 的边界**：
+### 外键默认是开的
 
-| 条件 | 结果 |
-| --- | --- |
-| 表**有行** + `NOT NULL` 无默认值 | 失败：`Cannot add a NOT NULL column with default value NULL` |
-| 表**空** + `NOT NULL` 无默认值 | 成功 |
-| 表**有行** + `NOT NULL DEFAULT ''` | 成功 |
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');
+const a=new DatabaseSync(':memory:');
+console.log('默认:', JSON.stringify(a.prepare('PRAGMA foreign_keys').get())); a.close();
+const b=new DatabaseSync(':memory:',{enableForeignKeyConstraints:false});
+console.log('显式关掉:', JSON.stringify(b.prepare('PRAGMA foreign_keys').get()));"
+```
 
-**CREATE TABLE IF NOT EXISTS**：老表上重跑（多一列）→ 列不变。
+```
+默认: {"foreign_keys":1}
+显式关掉: {"foreign_keys":0}
+```
 
-**DDL 在 SQLite 里是事务性的**：事务里建的表，`ROLLBACK` 之后不存在。所以「每个迁移一个事务」成立。
-DDL 走 `prepare().all()` 正常，所以数据层只要 `query` / `one` / `transaction` 三个方法就够，不需要第四个。
+`@types/node` 的 `sqlite.d.ts` 里也标着 `@default true`（`enableForeignKeyConstraints` 字段上方）。
 
-**浮点（会错的）**：`0.1 + 0.2 = 0.30000000000000004`、`8.2 * 3 = 24.599999999999998`、
-`4.35 * 100 = 434.99999999999994`、`1.005 * 100 = 100.49999999999999`。
-SQLite REAL 列里 `8.2 * 3` 存下来就是 `24.599999999999998`。
+**所以「SQLite 默认关外键」是错的**，会把读者引去查一个不存在的问题。
 
-**浮点（不会错的，别拿去举例）**：`0.999 + 1.5 + 0.501`、`19.99 * 3`、`9.99 + 0.01`、
-`29.9 + 10.1`、`1234.56 + 0.44`。这几个实跑结果都精确。
-S2 就因为随手挑了 `0.999 + 1.5 + 0.501` 当反例，测试直接挂了一条。
+显式关掉之后，删父行会留下孤儿行**且不报错**：
+
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');
+const b=new DatabaseSync(':memory:',{enableForeignKeyConstraints:false});
+b.exec('CREATE TABLE p(id INTEGER PRIMARY KEY)');
+b.exec('CREATE TABLE c(id INTEGER PRIMARY KEY, pid INTEGER REFERENCES p(id))');
+b.prepare('INSERT INTO p VALUES (1)').run();
+b.prepare('INSERT INTO c VALUES (1,1)').run();
+b.exec('DELETE FROM p WHERE id=1');
+console.log('子行还在:', b.prepare('SELECT COUNT(*) AS n FROM c').get().n);"
+```
+
+```
+子行还在: 1
+```
+
+事务内设置静默无效：
+
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');
+const d=new DatabaseSync(':memory:',{enableForeignKeyConstraints:false});
+d.prepare('PRAGMA foreign_keys = OFF').run();
+d.exec('BEGIN');
+d.prepare('PRAGMA foreign_keys = ON').run();
+console.log('事务内设 ON 之后:', JSON.stringify(d.prepare('PRAGMA foreign_keys').get()));
+d.exec('ROLLBACK');"
+```
+
+```
+事务内设 ON 之后: {"foreign_keys":0}
+```
+
+开着的状态下，有子行时删父行 → `errcode: 787`（`SQLITE_CONSTRAINT_FOREIGNKEY`），ch04 的 409 就是从它翻译出来的。
+
+### ADD COLUMN 的边界
+
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');
+const d=new DatabaseSync(':memory:');
+d.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, title TEXT)');
+d.prepare('INSERT INTO t (title) VALUES (?)').run('有一条数据');
+try { d.exec('ALTER TABLE t ADD COLUMN owner TEXT NOT NULL'); console.log('有行+无默认值: 成功'); }
+catch(e){ console.log('有行+无默认值: 失败 ->', e.message); }
+try { d.exec('ALTER TABLE t ADD COLUMN owner TEXT NOT NULL DEFAULT \'\'');
+      console.log('有行+有默认值:', JSON.stringify(d.prepare('PRAGMA table_info(t)').all().map(r=>r.name))); }
+catch(e){ console.log('有行+有默认值: 失败 ->', e.message); }
+const e2=new DatabaseSync(':memory:');
+e2.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, title TEXT)');
+e2.exec('ALTER TABLE t ADD COLUMN owner TEXT NOT NULL');
+console.log('空表+无默认值: 成功');"
+```
+
+```
+有行+无默认值: 失败 -> Cannot add a NOT NULL column with default value NULL
+有行+有默认值: ["id","title","owner"]
+空表+无默认值: 成功
+```
+
+**「能不能加」取决于表里有没有数据，不是语法允不允许。**
+
+### CREATE TABLE IF NOT EXISTS 不管表长什么样
+
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');
+const d=new DatabaseSync(':memory:');
+d.exec('CREATE TABLE products (id INTEGER PRIMARY KEY, sku TEXT)');
+d.prepare('INSERT INTO products (sku) VALUES (?)').run('OLD-1');
+console.log('老库的列:', JSON.stringify(d.prepare('PRAGMA table_info(products)').all().map(r=>r.name)));
+d.exec('CREATE TABLE IF NOT EXISTS products (id INTEGER PRIMARY KEY, sku TEXT, name TEXT, price_cents INTEGER)');
+console.log('重跑之后:', JSON.stringify(d.prepare('PRAGMA table_info(products)').all().map(r=>r.name)));
+console.log('表里的行:', JSON.stringify(d.prepare('SELECT * FROM products').all()));"
+```
+
+```
+老库的列: ["id","sku"]
+重跑之后: ["id","sku"]
+表里的行: [{"id":1,"sku":"OLD-1"}]
+```
+
+**新加的列没有出现。** `IF NOT EXISTS` 只判断「这张表在不在」。
+
+### DDL 在 SQLite 里是事务性的
+
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');
+const d=new DatabaseSync(':memory:');
+d.exec('BEGIN');
+d.prepare('CREATE TABLE v (id INTEGER PRIMARY KEY)').all();
+d.exec('ROLLBACK');
+console.log('回滚后表数:', d.prepare('SELECT COUNT(*) AS n FROM sqlite_master WHERE name = \'v\'').get().n);"
+```
+
+```
+回滚后表数: 0
+```
+
+两个推论：
+
+- 「每个迁移一个事务」成立——执行到一半失败不会留下建了一半的表
+- DDL 走 `prepare().all()` 正常，所以数据层只要 `query` / `one` / `transaction` 三个方法就够，**不需要第四个**
+
+### 浮点：会错的
+
+```bash
+node -e "console.log('0.1+0.2  =', 0.1+0.2);
+console.log('8.2*3    =', 8.2*3);
+console.log('4.35*100 =', 4.35*100);
+console.log('1.005*100=', 1.005*100);"
+```
+
+```
+0.1+0.2  = 0.30000000000000004
+8.2*3    = 24.599999999999998
+4.35*100 = 434.99999999999994
+1.005*100= 100.49999999999999
+```
+
+存进 SQLite 的 REAL 列也是同一个值：
+
+```bash
+node -e "const {DatabaseSync}=require('node:sqlite');
+const d=new DatabaseSync(':memory:');
+d.exec('CREATE TABLE t(v REAL)');
+d.prepare('INSERT INTO t VALUES (?)').run(8.2*3);
+console.log('REAL 列读回来:', d.prepare('SELECT v FROM t').get().v);"
+```
+
+```
+REAL 列读回来: 24.599999999999998
+```
+
+### 浮点：不会错的，别拿去举例
+
+```bash
+node -e "console.log('0.999+1.5+0.501 =', 0.999+1.5+0.501);
+console.log('19.99*3          =', 19.99*3);
+console.log('9.99+0.01        =', 9.99+0.01);
+console.log('29.9+10.1        =', 29.9+10.1);
+console.log('1234.56+0.44     =', 1234.56+0.44);"
+```
+
+```
+0.999+1.5+0.501 = 3
+19.99*3          = 59.97
+9.99+0.01        = 10
+29.9+10.1        = 40
+1234.56+0.44     = 1235
+```
+
+**这五个全是精确的。** S2 就因为随手挑了 `0.999 + 1.5 + 0.501` 当反例，测试直接挂了一条。
+写教程或报告时最容易出的错就是「随手挑几个数」说明浮点有问题——挑到不会错的那组，整段话就废了。
+
+### 没有 asyncHandler 会怎样（ch04 用）
+
+**不是「请求挂住」，是整个进程退出。** 本会话实跑确认：
+
+```bash
+# 正常：包着 asyncHandler
+curl -i --max-time 5 http://localhost:3002/api/products/1.5
+```
+
+```
+HTTP/1.1 400 Bad Request
+{"error":{"code":"INVALID_PARAM","message":"id 必须是正整数"}}
+```
+
+22 毫秒返回，服务继续跑。**把那一处的 `asyncHandler(...)` 拆掉，其余不动**，同一条命令：
+
+```
+HTTP 000  耗时 0.031s
+```
+
+`000` 是 curl 的说法：连接被关掉了，一个字节都没收到。随后 `curl /api/health` 也是 `000`，Node 进程已经不在了：
+
+```
+HttpError: id 必须是正整数
+    at parseId (apps/api/src/routes/products.ts:54:11)
+    at <anonymous> (apps/api/src/routes/products.ts:73:16)
+  status: 400,
+  code: 'INVALID_PARAM',
+  fields: undefined
+}
+
+Node.js v24.16.0
+```
+
+**一条非法参数请求打死整个服务，当时在处理的所有请求一起死。** Express 4 不等 async 路由返回的 Promise，`throw` 变成 unhandled rejection，Node 15 之后默认让进程退出。
+
+ch04 的计划里原本预测的是「请求挂住直到超时」。**实跑推翻了这个预测**，已按实跑结果写进文档。教训：隐性规则这一类，**不跑就没有准确描述**。
 
 ## 载体状态
 
