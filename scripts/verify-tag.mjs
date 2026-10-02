@@ -67,10 +67,12 @@ try {
   // 有 lock 就走 npm ci，因为它严格按 lock 装，能顺带发现 lock 和 package.json 不同步
   const hasLock = existsSync(join(workDir, 'package-lock.json'))
   console.log(`   执行：${hasLock ? 'npm ci' : 'npm install'}`)
-  execFileSync(npmBin(), hasLock ? ['ci'] : ['install'], { cwd: workDir, stdio: 'inherit' })
+  const install = npmArgs(hasLock ? ['ci'] : ['install'])
+  execFileSync(install.cmd, install.args, { cwd: workDir, stdio: 'inherit' })
 
   step('跑测试')
-  execFileSync(npmBin(), ['test'], { cwd: workDir, stdio: 'inherit' })
+  const test = npmArgs(['test'])
+  execFileSync(test.cmd, test.args, { cwd: workDir, stdio: 'inherit' })
 
   step('起服务并等健康检查通过')
   // 自己找一个空端口，不用 3002——那可能正被你自己开着的服务占着，
@@ -134,13 +136,22 @@ function step(msg) {
 }
 
 /**
- * Windows 上 npm 是个 .cmd 包装脚本，直接 spawn('npm') 找不到。
- * 用 npmBin() 指到 .cmd 就够，不需要开 shell。
- * 开 shell 会触发 Node 的 DEP0190 警告：参数不经转义只做拼接，
- * 路径里有空格或特殊字符时行为不可预期。
+ * 跑 npm 的正确姿势：绕过 .cmd，直接用 node 跑 npm 的 JS 入口。
+ *
+ * 两条弯路都踩过：
+ * 1. spawn('npm', { shell: true }) —— 能跑通，但 Node 会报 DEP0190：
+ *    参数不经转义只做拼接，路径里有空格或特殊字符时行为不可预期。
+ * 2. spawn('npm.cmd') —— Windows 上 Node 24 直接报 EINVAL。
+ *    这是 CVE-2024-27980 的修复：新版 Node 拒绝不经 shell 执行 .cmd / .bat。
+ *
+ * 入口路径从当前 node.exe 推出来，所以不用猜 npm 装在哪。
  */
-function npmBin() {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm'
+function npmArgs(args) {
+  const npmCli = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')
+  if (!existsSync(npmCli)) {
+    fail(`找不到 npm 的入口 ${npmCli}。这个脚本需要用 node 自带的 npm 跑。`)
+  }
+  return { cmd: process.execPath, args: [npmCli, ...args] }
 }
 
 function fail(msg) {
