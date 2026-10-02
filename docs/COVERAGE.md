@@ -2,17 +2,17 @@
 
 这个文件是会话之间的交接依据。换一个会话接着做之前，先读它。
 
-最后更新：S1 完成时
+最后更新：S2 完成时
 
 ## 现在在哪
 
-S1（立项与约定）已完成，尚未开写任何章节。
+S2（ch04 数据模型 + ch05 迁移）已完成。ch06 起未开始。
 
 | 章节 | 主题 | tag | 状态 |
 | --- | --- | --- | --- |
 | — | 立项基线 | `v0.0` | 已完成 |
-| ch04 | 数据模型 | `v1.0` | 未开始 |
-| ch05 | 迁移 | `v1.1` | 未开始 |
+| ch04 | 数据模型 | `v1.0` | 已完成 |
+| ch05 | 迁移 | `v1.1` | 已完成 |
 | ch06 | 零停机变更 | `v1.2` | 未开始 |
 | ch07 | 事务 | `v1.3` | 未开始 |
 | ch08 | 换 PostgreSQL | `v1.4` | 未开始 |
@@ -21,56 +21,88 @@ S1（立项与约定）已完成，尚未开写任何章节。
 | ch11 | 错误契约 | `v1.7` | 未开始 |
 | ch12 | 性能 | `v1.8` | 未开始 |
 
+手册侧在 `fullstack-handbook` 的 `docs/guide/deep/`，侧边栏是「后端往下走」第二分组。
+
 ## 已经验过的
 
 | 项 | 结果 |
 | --- | --- |
-| `npm test` | 3 pass / 0 fail |
-| `npm run typecheck` | 退出 0 |
-| 类型检查有效性 | 注入两处错误都抓到：导入不存在的导出报 `TS2724`、数字赋给 `service` 报 `TS2322`，均退出 1；恢复后回 0 |
-| `PRAGMA foreign_keys` 默认值 | 实测 `1`（开），传 `enableForeignKeyConstraints: false` 才是 0 |
-| `npm ls zod` | 解析到 `3.25.76`（`~3.25.76` 生效） |
-| `node scripts/verify-tag.mjs v0.0` | 走完导出→装依赖→测试→起服务→健康检查，退出 0 |
+| `npm run verify` | 退出 0（typecheck + 47 tests / 0 fail） |
+| `npm test` | 47 tests / 17 suites / 0 fail |
+| `node scripts/verify-tag.mjs v1.0` | 走完七步，导出目录里 35 tests 全跑，退出 0 |
+| `node scripts/verify-tag.mjs v1.1` | 同上，47 tests 全跑，退出 0 |
 | 对不存在的 tag 跑同一脚本 | 退出 1，不静默通过 |
-| `docker compose up -d` | 容器起来且 healthy |
+| 开发库 `apps/api/data/app.db` | 测试全程不碰（用 mkdtemp 临时库） |
+| 手册 `npm run build` | 退出 0 |
+| 手册 `npm run check:links` | 21 页 559 条站内链接（含 54 个锚点）全部有效 |
+| 三页新文章节 | 200；桌面 1280px 与窄屏 874px 两档都正常；控制台 0 错误 |
+| 计划性/自标榜字样 | 三页均为 0（待写/待补/还没写/我们只讲/TODO/占位） |
 
-S1 按计划不做变异测试：从 S2 起每章必做。类型检查本身的变异测试已在 S1 做过，因为「检查器是摆设」这件事不等到 S2 才发现就太晚了。
+## 变异测试记录
 
-## Node 版本下限
+| 改坏的地方 | 挂掉的用例 |
+| --- | --- |
+| 去掉 DELETE 里的外键 409 翻译 | 1 条：删一个已经被订单引用的商品，返回 409 而不是 500 |
+| `rowToProduct` 里 `price_cents` 除以 100 | 3 条：三件 8.2 元的商品，用分算是精确的 2460 / 合法输入返回 201，并带上数据库自动发的 id / 以分存的整数读回来还是整数，不会变成小数 |
+| 关掉迁移的 checksum 校验 | 2 条：版本号在、内容不同，抛 MigrationError / 停下的时候，后面的迁移一个都不会跑 |
 
-`>=22.13.0`。`node:sqlite` 在 v22.5.0 加入，但要到 v22.13.0 / v23.4.0 才去掉 `--experimental-sqlite` 标志。22.0–22.4 没这个模块，22.5–22.12 有但要手动加 flag。CI 矩阵写 `22` 会解析到最新 22.x，掩盖掉这个下限，所以 `engines` 和 README 都写死。
+**前两条抓到的用例没有重叠**，说明它们守的是不同行为。
+
+## 本机实跑确认的事实（写文档直接用，别再自己猜）
+
+**外键**：`node:sqlite` 默认 `foreign_keys = 1`（开），`@types/node` 标 `@default true`。
+传 `enableForeignKeyConstraints: false` 才是 0，删父行后孤儿行静默留存。
+`PRAGMA foreign_keys = ON` 在事务内**静默无效**。有子行时删父行 → `errcode: 787`。
+
+**ADD COLUMN 的边界**：
+
+| 条件 | 结果 |
+| --- | --- |
+| 表**有行** + `NOT NULL` 无默认值 | 失败：`Cannot add a NOT NULL column with default value NULL` |
+| 表**空** + `NOT NULL` 无默认值 | 成功 |
+| 表**有行** + `NOT NULL DEFAULT ''` | 成功 |
+
+**CREATE TABLE IF NOT EXISTS**：老表上重跑（多一列）→ 列不变。
+
+**DDL 在 SQLite 里是事务性的**：事务里建的表，`ROLLBACK` 之后不存在。所以「每个迁移一个事务」成立。
+DDL 走 `prepare().all()` 正常，所以数据层只要 `query` / `one` / `transaction` 三个方法就够，不需要第四个。
+
+**浮点（会错的）**：`0.1 + 0.2 = 0.30000000000000004`、`8.2 * 3 = 24.599999999999998`、
+`4.35 * 100 = 434.99999999999994`、`1.005 * 100 = 100.49999999999999`。
+SQLite REAL 列里 `8.2 * 3` 存下来就是 `24.599999999999998`。
+
+**浮点（不会错的，别拿去举例）**：`0.999 + 1.5 + 0.501`、`19.99 * 3`、`9.99 + 0.01`、
+`29.9 + 10.1`、`1234.56 + 0.44`。这几个实跑结果都精确。
+S2 就因为随手挑了 `0.999 + 1.5 + 0.501` 当反例，测试直接挂了一条。
 
 ## 载体状态
 
-还没有任何表，也没有数据访问层。下面这些文件是 S2 要建的：
-
 ```
-apps/api/src/db/index.ts          三方法数据访问层（query / one / transaction）
-apps/api/src/db/sqlite.ts         node:sqlite 实现
-apps/api/src/db/migrate.ts        迁移执行器
-apps/api/src/db/migrations/
+apps/api/src/db/index.ts       Db 接口（query / one / transaction 三个方法）
+apps/api/src/db/sqlite.ts     node:sqlite 实现 + createDb 工厂 + 模块顶层 await migrate
+apps/api/src/db/migrate.ts    迁移执行器（版本表 + checksum + 每迁移一事务）
+apps/api/src/db/migrations/   001_init.ts、002_add_product_description.ts
+apps/api/src/routes/          products.ts、async-handler.ts
+apps/api/test/                harness.ts + 5 个测试文件
 ```
 
-## 下一步：S2 做 ch04 + ch05
+四张表 `users` / `products` / `orders` / `order_items` 已建，外键已生效。
+订单状态机用 `CHECK` 钉住了取值域（`pending` `paid` `shipped` `completed` `cancelled`），
+**转移规则还没实现**——那是 ch07 的事。
 
-ch04 数据模型，四张表（`users` / `products` / `orders` / `order_items`）加外键，同时建立三方法数据访问层。
+`errors.ts` 已有 `constraintKind()` / `isConstraint()`，能把 SQLite 扩展错误码
+翻译成 `PRODUCT_IN_USE` / `PRODUCT_SKU_TAKEN` / `CONSTRAINT_VIOLATION`。
 
-四件事最容易做错：
+## 下一步：S3 做 ch06 + ch07
 
-1. **数据层只暴露三个方法。** 一旦长出 `OrderRepository` / `ProductRepository` 就是过度抽象 —— `fullstack-dev` skill 明确警告不要强加模式。加这一层的唯一理由是 ch08 换库，所以只加到够换库为止。
-2. **显式写 `PRAGMA foreign_keys = ON`，但理由不是「SQLite 默认关着」。** 实测 `new DatabaseSync(path)` 的默认值是 `1`（开），`@types/node/sqlite.d.ts` 也标了 `@default true`；传 `enableForeignKeyConstraints: false` 才是 0。真要显式开，理由是三条：pragma 按连接生效、不写进数据库文件；**在事务内设置会静默无效**；换客户端（sqlite3 CLI、容器内工具、迁移工具）默认值不保证相同。写「默认关着」是错的，会把读者引去查一个不存在的问题。
-3. **金额用 INTEGER 存分。** ch04 要实跑一次 `REAL` 的 `0.1 + 0.2 !== 0.3`，不能只写结论。
-4. **孤儿行那个核心失败要真能复现。** 既然默认就开着外键，就得用 `enableForeignKeyConstraints: false` 建一个「没开外键」的库来演示，否则插孤儿行会直接被拒，演示不成立。
+ch06 零停机变更（expand-contract），ch07 事务边界。
 
-ch05 迁移表要带 checksum，且 checksum 对不上时**报错停下，不要自动继续**。
+ch06 已经铺好的伏笔：002 迁移里写了 `ADD COLUMN NOT NULL` 无默认值在有行表上会失败。
+这一章要讲的是**加列容易、删列和改类型难**，以及为什么老代码和新代码要能在同一段时间里
+同时对着一个库跑。
 
-收尾要做变异测试，把挂掉的测试名写进 commit message。
-
-## 已知接缝（S1 记录，S2 或之后要补）
-
-`errors.ts` 的兜底分支现在把所有未知异常都变成 500。还没有数据库时这样没问题，但 **ch04 一建表，这个缺口立刻变成「外键冲突返回 500」** —— 数据库约束失败是业务错误，客户端该看到 409 或 400，不是 500。
-
-ch04 接入数据层时一并处理：把约束冲突翻译成明确的业务错误码。
+ch07 建订单要同时动三张表（`orders` / `order_items` / `products.stock`），
+中途失败会留下不一致。`Db.transaction` 已经在 `sqlite.ts` 里实现好了，直接用。
 
 ## 硬约束
 
@@ -83,3 +115,10 @@ ch04 接入数据层时一并处理：把约束冲突翻译成明确的业务错
 - 文档不写「待写 / 待补 / 还没写」，不写「我们只讲 X 不讲 Y」这类句子
 - 文档里的每条命令标明是否改动数据
 - `::: request` 容器里的响应必须实跑抓取，不能凭印象写
+- **文档里举的每个例子都要实跑确认过**。会错和不会错的例子要分开写清楚，
+  随手挑数字是这一组已经犯过的错
+- **交接文档里的行为断言要带本会话跑出来的命令和输出**。S1 留下的
+  「SQLite 默认关着外键」没人跑过，害得 ch04 差点立论不成立
+- 每章收尾做变异测试，把挂掉的用例名写进 commit message
+- 加测试文件后要改根 `package.json` 的 `test` 脚本（显式列文件名），
+  并确认 `npm test` 的**测试条数涨了**。没涨就是没跑到
