@@ -9,7 +9,7 @@
   ],
   "scripts": {
     "dev:api": "npm run dev --workspace @fullstack/api",
-    "test": "tsx --test --test-timeout=60000 apps/api/test/api.test.ts apps/api/test/products.test.ts apps/api/test/foreign-key.test.ts apps/api/test/money.test.ts apps/api/test/migrate.test.ts apps/api/test/expand.test.ts apps/api/test/orders.test.ts apps/api/test/transaction.test.ts apps/api/test/placeholder.test.ts apps/api/test/pg-types.test.ts apps/api/test/frozen.test.ts packages/shared/test/schema.test.ts",
+    "test": "tsx --test --test-timeout=60000 apps/api/test/api.test.ts apps/api/test/products.test.ts apps/api/test/foreign-key.test.ts apps/api/test/money.test.ts apps/api/test/migrate.test.ts apps/api/test/expand.test.ts apps/api/test/orders.test.ts apps/api/test/transaction.test.ts apps/api/test/placeholder.test.ts apps/api/test/pg-types.test.ts apps/api/test/frozen.test.ts apps/api/test/idempotency.test.ts packages/shared/test/schema.test.ts",
     "typecheck": "tsc --build apps/api packages/shared tsconfig.scripts.json",
     "check:encoding": "node scripts/check-encoding.mjs",
     "verify": "npm run typecheck && npm run check:encoding && npm run test",

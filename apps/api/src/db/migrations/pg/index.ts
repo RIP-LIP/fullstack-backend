@@ -1,5 +1,6 @@
 import type { Migration } from '../../migrate.ts'
 import { m001 } from './001_pg_baseline.ts'
+import { m002 } from './002_idempotency_keys.ts'
 
 /**
  * PostgreSQL 这套的全部迁移。显式列出，不去扫目录。
@@ -8,4 +9,4 @@ import { m001 } from './001_pg_baseline.ts'
  * `CHAPTER_CHECKS` 里补一条——漏了的话跑那个 tag 会直接退出 1 并提示你，
  * 不会静默当成「验过了」。
  */
-export const pgMigrations: readonly Migration[] = [m001]
+export const pgMigrations: readonly Migration[] = [m001, m002]

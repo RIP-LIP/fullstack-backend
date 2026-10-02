@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { startHarness, createProduct, createUser } from './harness.ts'
 import type { Harness } from './harness.ts'
 import { columnsOf } from './test-db.ts'
+import { pgMigrations } from '../src/db/migrations/pg/index.ts'
 
 /**
  * PostgreSQL 的取值规则。
@@ -111,12 +112,27 @@ describe('表结构：PRAGMA 的替代品', () => {
     assert.ok(cols.includes('title'), '新列 title 必须在')
   })
 
-  test('版本表里只有一条记录，且是 pg_baseline', async () => {
+  // 对着迁移清单本身断言，不写死条数。写死的话每加一个迁移这条就红一次，
+  // 而那次红跟「迁移有没有跑对」没关系——是测试自己过期了。
+  test('版本表里的每一条都和迁移清单一一对上', async () => {
     const rows = await h.db.query<{ version: number; name: string }>(
       'SELECT version, name FROM schema_migrations ORDER BY version',
     )
-    assert.equal(rows.length, 1, 'PostgreSQL 这边只有基线一条，版本从 1 重新开始')
-    assert.equal(rows[0]?.version, 1)
-    assert.equal(rows[0]?.name, 'pg_baseline')
+    assert.equal(rows.length, pgMigrations.length)
+    for (const [i, row] of rows.entries()) {
+      assert.equal(row.version, pgMigrations[i]!.version)
+      assert.equal(row.name, pgMigrations[i]!.name)
+    }
+  })
+
+  // 这一条要单独钉住：PostgreSQL 这边的版本是**重新从 1 开始的**，
+  // 不接着 SQLite 那三个版本。写死了条数就会在加迁移时失效，
+  // 所以这里只钉「第一条是基线」这个不随章节变化的事实。
+  test('版本 1 一定是基线，版本号从 1 重新开始', async () => {
+    const first = await h.db.one<{ version: number; name: string }>(
+      'SELECT version, name FROM schema_migrations ORDER BY version LIMIT 1',
+    )
+    assert.equal(first?.version, 1)
+    assert.equal(first?.name, 'pg_baseline')
   })
 })

@@ -563,6 +563,168 @@ const CHAPTER_CHECKS = {
       },
     },
   ],
+
+  'v1.5': [
+    {
+      desc: '版本表里多了一条 idempotency_keys，版本号仍然连续',
+      run: async (_base, dir) => {
+        const rows = await readDb(dir, 'SELECT version, name FROM schema_migrations ORDER BY version')
+        const got = rows.map((r) => `${r.version}/${r.name}`).join(',')
+        const want = '1/pg_baseline,2/idempotency_keys'
+        if (got !== want) return `期望 ${want}，实际 ${got}`
+        return true
+      },
+    },
+    {
+      desc: '同一个幂等键发两次，只建一笔订单，库存只扣一次',
+      run: async (base, dir) => {
+        const userId = await seedUser(dir)
+        const p = await post(`${base}/api/products`, {
+          sku: `IDEM-${Date.now()}`,
+          name: '幂等',
+          priceCents: 100,
+          stock: 10,
+        })
+        if (p.status !== 201) return `准备商品失败：${p.status}`
+
+        const body = { userId, items: [{ productId: p.body.id, quantity: 2 }] }
+        const key = `verify-idem-${Date.now()}`
+        const ordersBefore = await readDb(dir, 'SELECT COUNT(*) AS n FROM orders')
+
+        const first = await postWithKey(`${base}/api/orders`, key, body)
+        if (first.status !== 201) return `第一次期望 201，实际 ${first.status}：${JSON.stringify(first.body)}`
+
+        // **重放返回 200 而不是 201**：第一次已经创建过，这一次没有创建。
+        const second = await postWithKey(`${base}/api/orders`, key, body)
+        if (second.status !== 200) return `重放期望 200，实际 ${second.status}`
+        if (second.body?.id !== first.body?.id) {
+          return `重放返回了另一笔订单：${second.body?.id} vs ${first.body?.id}`
+        }
+
+        const ordersAfter = await readDb(dir, 'SELECT COUNT(*) AS n FROM orders')
+        if (ordersAfter[0]?.n !== ordersBefore[0]?.n + 1) {
+          return `订单数期望只多 1，实际多了 ${ordersAfter[0]?.n - ordersBefore[0]?.n}`
+        }
+        const stock = await readDb(dir, `SELECT stock FROM products WHERE id = ${p.body.id}`)
+        if (stock[0]?.stock !== 8) return `库存期望 8（只扣 2），实际 ${stock[0]?.stock}`
+        return true
+      },
+    },
+    {
+      desc: '同一个幂等键配不同内容，返回 409 IDEMPOTENCY_KEY_REUSED',
+      run: async (base, dir) => {
+        const userId = await seedUser(dir)
+        const a = await post(`${base}/api/products`, {
+          sku: `IDEM-A-${Date.now()}`,
+          name: '甲',
+          priceCents: 100,
+          stock: 10,
+        })
+        const b = await post(`${base}/api/products`, {
+          sku: `IDEM-B-${Date.now()}`,
+          name: '乙',
+          priceCents: 200,
+          stock: 10,
+        })
+        if (a.status !== 201 || b.status !== 201) return `准备商品失败：${a.status} / ${b.status}`
+
+        const key = `verify-idem-mismatch-${Date.now()}`
+        const first = await postWithKey(`${base}/api/orders`, key, {
+          userId,
+          items: [{ productId: a.body.id, quantity: 1 }],
+        })
+        if (first.status !== 201) return `第一次期望 201，实际 ${first.status}`
+
+        const second = await postWithKey(`${base}/api/orders`, key, {
+          userId,
+          items: [{ productId: b.body.id, quantity: 1 }],
+        })
+        if (second.status !== 409) return `期望 409，实际 ${second.status}`
+        if (second.body?.error?.code !== 'IDEMPOTENCY_KEY_REUSED') {
+          return `期望 IDEMPOTENCY_KEY_REUSED，实际 ${second.body?.error?.code}`
+        }
+        // 被拒绝的请求不能有任何副作用
+        const stockB = await readDb(dir, `SELECT stock FROM products WHERE id = ${b.body.id}`)
+        if (stockB[0]?.stock !== 10) return `乙的库存被动过：${stockB[0]?.stock}`
+        return true
+      },
+    },
+    {
+      desc: '建单失败会还回幂等键，同一个键换个内容还能用',
+      run: async (base, dir) => {
+        // 这一条是「失败不留半截状态」在幂等上的样子。
+        // 键不还回去的话，第二次会是 409 IDEMPOTENT_REQUEST_IN_PROGRESS，
+        // 而客户端永远拿不到结果。
+        const userId = await seedUser(dir)
+        const p = await post(`${base}/api/products`, {
+          sku: `IDEM-FAIL-${Date.now()}`,
+          name: '会失败',
+          priceCents: 100,
+          stock: 1,
+        })
+        if (p.status !== 201) return `准备商品失败：${p.status}`
+
+        const key = `verify-idem-fail-${Date.now()}`
+        const failed = await postWithKey(`${base}/api/orders`, key, {
+          userId,
+          items: [{ productId: p.body.id, quantity: 99 }],
+        })
+        if (failed.status !== 409) return `期望 409，实际 ${failed.status}`
+        if (failed.body?.error?.code !== 'OUT_OF_STOCK') {
+          return `期望 OUT_OF_STOCK，实际 ${failed.body?.error?.code}`
+        }
+
+        // 键已经还回来了，所以同一个键现在能正常用
+        const ok = await postWithKey(`${base}/api/orders`, key, {
+          userId,
+          items: [{ productId: p.body.id, quantity: 1 }],
+        })
+        if (ok.status !== 201) {
+          return `失败之后同一个键应当还能用，实际 ${ok.status}：${ok.body?.error?.code ?? ''}`
+        }
+        return true
+      },
+    },
+    {
+      desc: '没带幂等键就是普通请求：两次建两笔',
+      run: async (base, dir) => {
+        // 幂等是**显式**的。不带键就什么都不做——
+        // 自动生成一个键等于把幂等变成碰运气。
+        const userId = await seedUser(dir)
+        const p = await post(`${base}/api/products`, {
+          sku: `IDEM-NOKEY-${Date.now()}`,
+          name: '不带键',
+          priceCents: 100,
+          stock: 10,
+        })
+        if (p.status !== 201) return `准备商品失败：${p.status}`
+
+        const body = { userId, items: [{ productId: p.body.id, quantity: 1 }] }
+        const before = await readDb(dir, 'SELECT COUNT(*) AS n FROM orders')
+        const first = await post(`${base}/api/orders`, body)
+        const second = await post(`${base}/api/orders`, body)
+        if (first.status !== 201 || second.status !== 201) {
+          return `不带键时两次都该 201，实际 ${first.status} / ${second.status}`
+        }
+        const after = await readDb(dir, 'SELECT COUNT(*) AS n FROM orders')
+        if (after[0]?.n !== before[0]?.n + 2) return `订单数期望多 2，实际多了 ${after[0]?.n - before[0]?.n}`
+        return true
+      },
+    },
+    {
+      desc: '幂等键表里没有漏出请求体之外的敏感字段',
+      run: async (_base, dir) => {
+        const rows = await readDb(dir, 'SELECT key, request_hash, order_id FROM idempotency_keys LIMIT 1')
+        if (rows.length === 0) return '前面几条应该至少留下一行'
+        const r = rows[0]
+        if (r.order_id === null) return '成功的请求应该回填了 order_id'
+        if (typeof r.request_hash !== 'string' || r.request_hash.length !== 64) {
+          return `request_hash 应该是 64 位十六进制，实际 ${String(r.request_hash).length} 位`
+        }
+        return true
+      },
+    },
+  ],
 }
 
 /**
@@ -793,6 +955,22 @@ async function post(url, payload) {
  */
 async function del(url) {
   const res = await fetch(url, { method: 'DELETE' })
+  return { status: res.status, body: await res.json().catch(() => null) }
+}
+
+/**
+ * 带幂等键发一个 POST。
+ * @param {string} url
+ * @param {string} key
+ * @param {unknown} payload
+ * @returns {Promise<Resp>}
+ */
+async function postWithKey(url, key, payload) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': key },
+    body: JSON.stringify(payload),
+  })
   return { status: res.status, body: await res.json().catch(() => null) }
 }
 
