@@ -1,4 +1,5 @@
 import { DatabaseSync } from 'node:sqlite'
+import { AsyncLocalStorage } from 'node:async_hooks'
 import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import type { Db, Param } from './index.ts'
@@ -16,6 +17,30 @@ export type SqliteHandle = {
   db: Db
   raw: DatabaseSync
   close: () => void
+}
+
+/**
+ * 项目自己的「不支持嵌套事务」。
+ *
+ * 原来没有这个类型，报错是从 SQLite 直接漏出来的
+ * （cannot start a transaction within a transaction）。两个问题：
+ * 一是那句话对读代码的人没有意义，二是它经过错误处理之后会变成 500，
+ * 而「你把事务边界画错了」是一个应该在开发期就看清的 400/500 级错误，
+ * 不该伪装成「服务端出错了」。
+ */
+export class NestedTransactionError extends Error {
+  constructor() {
+    super(
+      [
+        '不支持嵌套事务。',
+        '',
+        '这说明边界画错了：内层想开的事务应该和外层是同一个，',
+        '或者它们本来就该是两个互不相干的事务，不该一个套一个。',
+        '加个计数器把嵌套「支持」起来只会让问题更晚暴露。',
+      ].join('\n'),
+    )
+    this.name = 'NestedTransactionError'
+  }
 }
 
 /**
@@ -47,25 +72,87 @@ export function createDb(file: string): SqliteHandle {
   raw.exec('PRAGMA journal_mode = WAL')
   raw.exec('PRAGMA foreign_keys = ON')
 
+  /**
+   * 「这条连接现在是不是已经有主了」。
+   *
+   * AsyncLocalStorage 存的是**异步上下文**，不是全局变量。事务体里
+   * await 出去的每一段异步代码都带着同一个标记，外面的请求拿不到。
+   * 这就是能区分「事务体自己的读写」和「别人的读写」的原因——
+   * 用一个普通布尔量区分不了，因为 await 期间控制权根本不在栈上。
+   */
+  const txOwner = new AsyncLocalStorage<true>()
+
+  /** 有事务开着的时候为 true。连接一次只归一个事务。 */
+  let busy = false
+
+  /** 等连接的人。连接一空就全部叫醒。 */
+  const waiters: Array<() => void> = []
+
+  /**
+   * 拿到连接的唯一入口。
+   *
+   * 有事务开着的时候，事务体**之外**的读写在这里排队，直到那个事务结束。
+   * 没有这一步，事务体一旦 await 到事件循环，另一个请求的写语句就会被
+   * 执行在这个事务里，跟着它一起回滚——那个请求拿到的是成功响应，
+   * 数据却没了，全程没有任何异常。
+   *
+   * 判断条件是「不是这个事务的owner」，不是「我在不在回调里」。
+   * 前者靠 AsyncLocalStorage，后者靠调用栈，await 一层就失效了。
+   */
+  async function withConnection<T>(fn: () => T): Promise<T> {
+    while (busy && txOwner.getStore() !== true) {
+      await new Promise<void>((resolve) => waiters.push(resolve))
+    }
+    return fn()
+  }
+
   const db: Db = {
     async query<T>(sql: string, params: readonly Param[] = []): Promise<T[]> {
-      return raw.prepare(sql).all(...params) as unknown as T[]
+      return withConnection(() => raw.prepare(sql).all(...params) as unknown as T[])
     },
 
     async one<T>(sql: string, params: readonly Param[] = []): Promise<T | undefined> {
-      const row = raw.prepare(sql).get(...params)
-      return row === undefined ? undefined : (row as unknown as T)
+      return withConnection(() => {
+        const row = raw.prepare(sql).get(...params)
+        return row === undefined ? undefined : (row as unknown as T)
+      })
     },
 
     async transaction<T>(fn: (tx: Db) => Promise<T>): Promise<T> {
+      // 先判嵌套，判据是「我自己是不是已经在事务体里」，不是 busy。
+      // busy 为 true 也可能只是另一个请求开着事务，那种情况该排队而不是报错。
+      if (txOwner.getStore() === true) throw new NestedTransactionError()
+
+      while (busy) {
+        await new Promise<void>((resolve) => waiters.push(resolve))
+      }
+      busy = true
       raw.exec('BEGIN')
+
       try {
-        const result = await fn(db)
+        const result = await txOwner.run(true, () => fn(db))
         raw.exec('COMMIT')
         return result
       } catch (err) {
-        raw.exec('ROLLBACK')
+        // 回滚失败**不能顶替**原始错误。
+        //
+        // 没有活动事务时 ROLLBACK 自己会抛
+        // （cannot rollback - no transaction is active）。让那句话说出去的话，
+        // 调用方原本的 409 OUT_OF_STOCK 就变成了 500 INTERNAL_ERROR，
+        // 真正的原因只留在日志里——正是前面几章一直在消灭的那种失败。
+        // 所以这里把两个错误都留着，原始的那个优先。
+        try {
+          raw.exec('ROLLBACK')
+        } catch (rollbackErr) {
+          console.error('[db] 回滚失败，事务状态可能已经不对了：', rollbackErr)
+        }
         throw err
+      } finally {
+        // 必须放 finally。放错位置的话，回滚路径下连接永远不释放，
+        // 后面所有请求都卡在这个队列上，整服务假死。
+        busy = false
+        const waiting = waiters.splice(0)
+        for (const wake of waiting) wake()
       }
     },
   }

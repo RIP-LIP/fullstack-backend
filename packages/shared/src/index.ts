@@ -6,8 +6,8 @@ export { z }
  * 对外的错误响应体，全项目只有这一个形状：
  *   { "error": { "code": "VALIDATION_FAILED", "message": "...", "fields": {...} } }
  *
- * 有了它，前端只需要判断一个形状。ch11 会把「为什么不能只用 HTTP 状态码」
- * 讲透，这里先把形状定死，后面 9 章都不许改。
+ * 有了它，前端只需要判断一个形状，不用为每种错误写一套解析。
+ * 形状定死之后就不再改：改动会让所有调用方的错误处理同时失效。
  */
 export interface ApiError {
   error: {
@@ -78,8 +78,8 @@ export type CreateProductInput = z.infer<typeof CreateProductInput>
 /**
  * 对外返回的商品。字段名是驼峰，和数据库的 snake_case 不是一回事。
  *
- * **name 和 title 都在返回。** ch06 正在把 name 换成 title，
- * expand 阶段两个键都得在，contract 阶段（未来的 004）才拿掉 name。
+ * **name 和 title 都在返回。** 正在把 name 换成 title，
+ * expand 阶段两个键都得在，contract 阶段才拿掉 name。
  * 现在少返回一个，老版本调用方就少一个字段。
  */
 export const Product = z.object({

@@ -1,8 +1,7 @@
 /**
  * 环境变量集中读这一处。
  *
- * 只放当前代码真的读到的键。计划里的 DATABASE_URL 等到 ch08 换成
- * PostgreSQL 时再加——放进来没人读，就是一份会腐烂的配置。
+ * 只放当前代码真的读到的键。放进来没人读，就是一份会腐烂的配置。
  */
 
 import { dirname, resolve } from 'node:path'

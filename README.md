@@ -19,7 +19,7 @@ Node 版本下限不是拍脑袋定的。`node:sqlite` 在 v22.5.0 加入，但�
 
 ```bash
 npm install
-npm test          # 47 条测试
+npm test          # 56 条测试
 npm run dev:api   # 起服务，监听 3002
 ```
 
@@ -71,7 +71,7 @@ apps/api/
   src/db/index.ts            数据访问层的接口（三个方法）
   src/db/sqlite.ts           node:sqlite 实现，全项目唯一知道底层的地方
   src/db/migrate.ts          迁移执行器
-  src/db/migrations/         001_init、002_add_product_description
+  src/db/migrations/         001_init、002_add_product_description、003_add_product_title
   src/routes/products.ts     商品接口
   src/routes/async-handler.ts 让 async 路由的错误能走到错误中间件
   test/harness.ts            测试的公共启动逻辑
@@ -80,9 +80,12 @@ apps/api/
   test/foreign-key.test.ts   外键约束
   test/money.test.ts         金额为什么存整数分
   test/migrate.test.ts       迁移
+  test/expand.test.ts        双读双写与回填
 packages/shared/             Zod schema 与共享类型
 scripts/
   verify-tag.mjs             tag 级复现
+  backfill.mjs               分批回填（幂等 + 可中断）
+  check-encoding.mjs         乱码检查
 docker-compose.yml           PostgreSQL
 ```
 
