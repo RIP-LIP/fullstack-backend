@@ -29,9 +29,11 @@ S2（ch04 数据模型 + ch05 迁移）已完成。ch06 起未开始。
 | --- | --- |
 | `npm run verify` | 退出 0（typecheck + 47 tests / 0 fail） |
 | `npm test` | 47 tests / 17 suites / 0 fail |
-| `node scripts/verify-tag.mjs v1.0` | 走完七步，导出目录里 35 tests 全跑，退出 0 |
-| `node scripts/verify-tag.mjs v1.1` | 同上，47 tests 全跑，退出 0 |
+| `node scripts/verify-tag.mjs v1.0` | 走完八步，导出目录里 35 tests 全跑，**本章验证命令 5/5**，退出 0 |
+| `node scripts/verify-tag.mjs v1.1` | 同上，47 tests 全跑，**本章验证命令 4/4**，退出 0 |
 | 对不存在的 tag 跑同一脚本 | 退出 1，不静默通过 |
+| 对**没配本章检查**的 tag 跑 | 退出 1，打印「加一章就要在 CHAPTER_CHECKS 里补一条」 |
+| 把 v1.0 的一条检查期望改错 | 只挂那一条，`1/5 条没过`，其余 4 条照常通过 |
 | 开发库 `apps/api/data/app.db` | 测试全程不碰（用 mkdtemp 临时库） |
 | 手册 `npm run build` | 退出 0 |
 | 手册 `npm run check:links` | 21 页 559 条站内链接（含 54 个锚点）全部有效 |

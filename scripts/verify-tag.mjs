@@ -10,7 +10,8 @@
  *   4. 跑测试
  *   5. 起服务，轮询 /api/health
  *   6. 响应体形状对吗
- *   7. 收尾：关服务、删临时目录
+ *   7. 跑该 tag 的本章验证命令
+ *   8. 收尾：关服务、删临时目录
  *
  * 任何一步失败都退出 1。故意不吞错误——一个静默通过的复现脚本
  * 比没有脚本更危险。
@@ -23,6 +24,7 @@ import { mkdtempSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { DatabaseSync } from 'node:sqlite'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(here, '..')
@@ -44,6 +46,196 @@ if (!tag) {
 
 let workDir = ''
 let server = null
+/** 本章验证命令里没过的条目名，最后统一报 */
+const failedChecks = []
+
+/**
+ * 每个 tag 的「本章验证命令」。
+ *
+ * 为什么不用 shell + curl：
+ * 1. 跨平台。Windows 上 PowerShell 的引号规则会把 curl 的 JSON body 吃掉，
+ *    写进脚本就等于把这个坑复制一遍。
+ * 2. 命令本身要是「真的会被读者复制」的东西，就不该依赖调用者的 shell 语法。
+ *
+ * 每个 check 返回 true 或一段说明为什么不过的字符串。
+ * `run` 收到 baseUrl 和导出目录 workDir。
+ *
+ * **加一章就要在这里加一条。** 没加的话下面会明确打印「本章暂无验证命令」，
+ * 而不是悄悄跳过——不然新增的章节会看起来像验过了，其实只测了 health。
+ *
+ * @type {Record<string, Array<{desc: string, run: (base: string, dir: string) => Promise<true|string>}>>}
+ */
+const CHAPTER_CHECKS = {
+  'v1.0': [
+    {
+      desc: 'POST /api/products 合法输入返回 201，并带上数据库自动发的 id',
+      run: async (base) => {
+        const res = await post(`${base}/api/products`, { sku: 'KB-87', name: '机械键盘', priceCents: 39900, stock: 25 })
+        if (res.status !== 201) return `期望 201，实际 ${res.status}`
+        if (typeof res.body?.id !== 'number') return '响应里没有数字 id'
+        return true
+      },
+    },
+    {
+      desc: '同 SKU 再建一次返回 409 PRODUCT_SKU_TAKEN',
+      run: async (base) => {
+        const res = await post(`${base}/api/products`, { sku: 'KB-87', name: '另一个', priceCents: 100, stock: 1 })
+        if (res.status !== 409) return `期望 409，实际 ${res.status}`
+        if (res.body?.error?.code !== 'PRODUCT_SKU_TAKEN') return `期望 PRODUCT_SKU_TAKEN，实际 ${res.body?.error?.code}`
+        return true
+      },
+    },
+    {
+      desc: '非法 id 返回 400 INVALID_PARAM（不是 404）',
+      run: async (base) => {
+        const res = await get(`${base}/api/products/1.5`)
+        if (res.status !== 400) return `期望 400，实际 ${res.status}`
+        if (res.body?.error?.code !== 'INVALID_PARAM') return `期望 INVALID_PARAM，实际 ${res.body?.error?.code}`
+        return true
+      },
+    },
+    {
+      desc: '不存在的商品返回 404 PRODUCT_NOT_FOUND',
+      run: async (base) => {
+        const res = await get(`${base}/api/products/999999`)
+        if (res.status !== 404) return `期望 404，实际 ${res.status}`
+        if (res.body?.error?.code !== 'PRODUCT_NOT_FOUND') return `期望 PRODUCT_NOT_FOUND，实际 ${res.body?.error?.code}`
+        return true
+      },
+    },
+    {
+      desc: '删一个已经被订单引用的商品返回 409 PRODUCT_IN_USE（ch04 的立论）',
+      run: async (base, dir) => {
+        await seedOrderReferencingProduct(dir)
+        const res = await del(`${base}/api/products/1`)
+        if (res.status !== 409) return `期望 409，实际 ${res.status}`
+        if (res.body?.error?.code !== 'PRODUCT_IN_USE') return `期望 PRODUCT_IN_USE，实际 ${res.body?.error?.code}`
+        return true
+      },
+    },
+  ],
+
+  'v1.1': [
+    {
+      desc: '版本表里有两条记录（001 / 002）',
+      run: async (_base, dir) => {
+        const rows = readDb(dir, 'SELECT version, name FROM schema_migrations ORDER BY version')
+        const got = rows.map((r) => `${r.version}/${r.name}`).join(',')
+        const want = '1/init,2/add_product_description'
+        if (got !== want) return `期望 ${want}，实际 ${got}`
+        return true
+      },
+    },
+    {
+      desc: '002 迁移加的 description 列真的在表上',
+      run: async (_base, dir) => {
+        const cols = readDb(dir, 'PRAGMA table_info(products)').map((r) => r.name)
+        if (!cols.includes('description')) return `列里没有 description，实际是 ${JSON.stringify(cols)}`
+        return true
+      },
+    },
+    {
+      desc: '金额以整数分原样往返，没有除以 100',
+      run: async (base) => {
+        const created = await post(`${base}/api/products`, { sku: 'MOU-1', name: '鼠标', priceCents: 12900, stock: 40 })
+        if (created.status !== 201) return `建商品返回 ${created.status}`
+        const got = await get(`${base}/api/products/${created.body.id}`)
+        if (got.body?.priceCents !== 12900) return `期望 priceCents=12900，实际 ${got.body?.priceCents}`
+        if (!Number.isInteger(got.body?.priceCents)) return `priceCents 不是整数：${got.body?.priceCents}`
+        return true
+      },
+    },
+    {
+      desc: '删一个已经被订单引用的商品返回 409 PRODUCT_IN_USE',
+      run: async (base, dir) => {
+        await seedOrderReferencingProduct(dir)
+        const res = await del(`${base}/api/products/1`)
+        if (res.status !== 409) return `期望 409，实际 ${res.status}`
+        if (res.body?.error?.code !== 'PRODUCT_IN_USE') return `期望 PRODUCT_IN_USE，实际 ${res.body?.error?.code}`
+        return true
+      },
+    },
+  ],
+}
+
+/**
+ * 往导出目录的库里插一条「订单引用了 product 1」的状态，制造 ch04 那个失败场景。
+ * @param {string} dir
+ */
+function seedOrderReferencingProduct(dir) {
+  const path = join(dir, 'apps', 'api', 'data', 'app.db')
+  const db = new DatabaseSync(path)
+  try {
+    const now = new Date().toISOString()
+    const u = /** @type {{id: number}} */ (
+      db.prepare('INSERT INTO users (email, created_at) VALUES (?, ?) RETURNING id').get(`verify-${Date.now()}@example.com`, now)
+    )
+    const o = /** @type {{id: number}} */ (
+      db
+        .prepare('INSERT INTO orders (user_id, status, total_cents, created_at) VALUES (?, ?, ?, ?) RETURNING id')
+        .get(u.id, 'paid', 39900, now)
+    )
+    db.prepare('INSERT INTO order_items (order_id, product_id, quantity, unit_price_cents) VALUES (?, ?, ?, ?)').run(
+      o.id,
+      1,
+      1,
+      39900,
+    )
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * 只读地查一下导出目录里的库
+ * @param {string} dir
+ * @param {string} sql
+ * @returns {any[]}
+ */
+function readDb(dir, sql) {
+  const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'), { readOnly: true })
+  try {
+    return db.prepare(sql).all()
+  } finally {
+    db.close()
+  }
+}
+
+/**
+ * @typedef {{status: number, body: any}} Resp
+ */
+
+/**
+ * @param {string} url
+ * @returns {Promise<Resp>}
+ */
+async function get(url) {
+  const res = await fetch(url)
+  return { status: res.status, body: await res.json().catch(() => null) }
+}
+
+/**
+ * @param {string} url
+ * @param {unknown} payload
+ * @returns {Promise<Resp>}
+ */
+async function post(url, payload) {
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  return { status: res.status, body: await res.json().catch(() => null) }
+}
+
+/**
+ * @param {string} url
+ * @returns {Promise<Resp>}
+ */
+async function del(url) {
+  const res = await fetch(url, { method: 'DELETE' })
+  return { status: res.status, body: await res.json().catch(() => null) }
+}
 
 try {
   step(`确认 tag ${tag} 存在`)
@@ -120,6 +312,40 @@ try {
     fail(`健康检查返回了预期外的形状：${JSON.stringify(body)}`)
   }
   console.log(`   拿到 ${JSON.stringify(body)}`)
+
+  step('跑该 tag 的本章验证命令')
+  const baseUrl = `http://127.0.0.1:${port}`
+  const checks = CHAPTER_CHECKS[tag]
+  if (checks === undefined) {
+    // 显式说出来，不静默跳过。新加一章忘了加检查，就该在这里被看见。
+    console.error(`   ${tag} 在验证表里没有对应条目。`)
+    console.error('   加一章就要在 CHAPTER_CHECKS 里补一条，否则它只测过健康检查。')
+    fail(`tag ${tag} 缺少本章验证命令`)
+  }
+
+  let passed = 0
+  for (const check of checks) {
+    let verdict
+    try {
+      verdict = await check.run(baseUrl, workDir)
+    } catch (err) {
+      verdict = `抛异常：${err instanceof Error ? err.message : String(err)}`
+    }
+
+    if (verdict === true) {
+      passed++
+      console.log(`   ✔ ${check.desc}`)
+    } else {
+      console.error(`   ✘ ${check.desc}`)
+      console.error(`       ${verdict}`)
+      failedChecks.push(check.desc)
+    }
+  }
+
+  if (failedChecks.length > 0) {
+    fail(`${failedChecks.length}/${checks.length} 条本章验证命令没过`)
+  }
+  console.log(`   ${passed}/${checks.length} 条通过`)
 
   console.log(`\n${tag} 复现通过。`)
   process.exitCode = 0
