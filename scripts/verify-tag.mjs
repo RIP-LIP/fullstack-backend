@@ -110,10 +110,16 @@ try {
   }
 
   step('检查响应体形状')
-  if (health.body.ok !== true || health.body.service !== 'api') {
-    fail(`健康检查返回了预期外的形状：${JSON.stringify(health.body)}`)
+  // 上面 fail() 一定会抛，所以这里 health 不是 null。tsc 看不穿抛异常这件事，
+  // 用一次明确的判空把这件事说出来，不靠它猜。
+  if (health === null) {
+    fail('健康检查没通过：拿不到响应体')
   }
-  console.log(`   拿到 ${JSON.stringify(health.body)}`)
+  const body = /** @type {{ ok?: unknown, service?: unknown }} */ (health.body)
+  if (body.ok !== true || body.service !== 'api') {
+    fail(`健康检查返回了预期外的形状：${JSON.stringify(body)}`)
+  }
+  console.log(`   拿到 ${JSON.stringify(body)}`)
 
   console.log(`\n${tag} 复现通过。`)
   process.exitCode = 0
@@ -148,18 +154,25 @@ try {
   }
 }
 
+/** @param {string} msg */
 function step(msg) {
   console.log(`\n▸ ${msg}`)
 }
 
-/** execFileSync 超时抛的错带 code: 'ETIMEDOUT'，signal 可能是 SIGTERM */
+/**
+ * execFileSync 超时抛的错带 code: 'ETIMEDOUT'，signal 可能是 SIGTERM
+ * @param {unknown} err
+ */
 function isTimeout(err) {
-  return typeof err === 'object' && err !== null && (err as { code?: string }).code === 'ETIMEDOUT'
+  return typeof err === 'object' && err !== null && /** @type {{code?: string}} */ (err).code === 'ETIMEDOUT'
 }
 
+/**
+ * @param {any} err
+ * @returns {string}
+ */
 function describeTimeout(err) {
-  const e = err as { syscall?: string; signal?: string }
-  return `（${e.syscall ?? '命令'} 收到 ${e.signal ?? 'SIGTERM'}，上限 ${INSTALL_TIMEOUT_MS / 1000} / ${TEST_TIMEOUT_MS / 1000} 秒）`
+  return `（${err.syscall ?? '命令'} 收到 ${err.signal ?? 'SIGTERM'}，上限 ${INSTALL_TIMEOUT_MS / 1000} / ${TEST_TIMEOUT_MS / 1000} 秒）`
 }
 
 /**
@@ -172,6 +185,9 @@ function describeTimeout(err) {
  *    这是 CVE-2024-27980 的修复：新版 Node 拒绝不经 shell 执行 .cmd / .bat。
  *
  * 入口路径从当前 node.exe 推出来，所以不用猜 npm 装在哪。
+ *
+ * @param {string[]} args
+ * @returns {{cmd: string, args: string[]}}
  */
 function npmArgs(args) {
   const npmCli = join(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')
@@ -181,13 +197,22 @@ function npmArgs(args) {
   return { cmd: process.execPath, args: [npmCli, ...args] }
 }
 
+/** @param {string} msg @returns {never} */
 function fail(msg) {
   console.error(`\n失败：${msg}`)
   const e = new Error('FAIL')
   throw e
 }
 
-/** 让系统分配一个端口再立刻放掉。拿到的是当时确定空闲的端口。 */
+/**
+ * 让系统分配一个端口再立刻放掉。拿到的是当时确定空闲的端口。
+ *
+ * 释放端口到 spawn 之间有个竞态窗口：别人可能抢走这个端口。
+ * 所以后面必须有健康检查兜底，最坏结果是报「服务起不来」，
+ * 而不是静默探到别的服务上。
+ *
+ * @returns {Promise<number>}
+ */
 function findFreePort() {
   return new Promise((res, rej) => {
     import('node:net').then(({ createServer }) => {
@@ -195,7 +220,15 @@ function findFreePort() {
       srv.unref()
       srv.on('error', rej)
       srv.listen(0, '127.0.0.1', () => {
-        const { port } = srv.address()
+        // address() 在没监听时返回 null，解构 null.port 会抛 TypeError。
+        // 走到这个回调说明已经在监听，但判空还是要写。
+        const address = srv.address()
+        if (address === null || typeof address === 'string') {
+          srv.close()
+          rej(new Error('拿不到分配的端口'))
+          return
+        }
+        const { port } = address
         srv.close(() => res(port))
       })
     })
@@ -206,6 +239,9 @@ function findFreePort() {
  * 轮询到健康检查通过为止。
  * 不用固定 sleep：固定 sleep 有两种失败模式——睡太久白等，
  * 睡太短服务还没起来就报「挂了」。轮询把两种都消掉。
+ *
+ * @param {number} port
+ * @returns {Promise<{status: number, body: any} | null>}
  */
 async function waitForHealth(port) {
   const deadline = Date.now() + HEALTH_TIMEOUT_MS
