@@ -41,6 +41,10 @@ export interface HealthResponse {
  *   - zod 拦住的是「请求不合规」，能指出是哪个字段、为什么
  *   - CHECK 约束拦住的是「不管从哪个口子写进来的数据都必须合法」
  * 绕过接口直接改库时，只有后者还在。所以两道都要。
+ *
+ * **title 和 name 都在收。** ch06 那一章在把 name 换成 title，
+ * expand 阶段新旧两个键都得接受，contract 阶段才把 name 拿掉。
+ * 现在是 expand，所以两个都在。
  */
 export const CreateProductInput = z.object({
   sku: z
@@ -53,6 +57,12 @@ export const CreateProductInput = z.object({
     .trim()
     .min(1, '名称不能为空')
     .max(200, '名称最多 200 个字符'),
+  title: z
+    .string()
+    .trim()
+    .min(1, '标题不能为空')
+    .max(200, '标题最多 200 个字符')
+    .optional(),
   priceCents: z
     .number({ required_error: '价格不能为空', invalid_type_error: '价格必须是数字' })
     .int('价格必须是以分计的整数，不能是小数')
@@ -65,11 +75,18 @@ export const CreateProductInput = z.object({
 
 export type CreateProductInput = z.infer<typeof CreateProductInput>
 
-/** 对外返回的商品。字段名是驼峰，和数据库的 snake_case 不是一回事。 */
+/**
+ * 对外返回的商品。字段名是驼峰，和数据库的 snake_case 不是一回事。
+ *
+ * **name 和 title 都在返回。** ch06 正在把 name 换成 title，
+ * expand 阶段两个键都得在，contract 阶段（未来的 004）才拿掉 name。
+ * 现在少返回一个，老版本调用方就少一个字段。
+ */
 export const Product = z.object({
   id: z.number().int(),
   sku: z.string(),
   name: z.string(),
+  title: z.string(),
   priceCents: z.number().int(),
   stock: z.number().int(),
   createdAt: z.string(),

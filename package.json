@@ -9,10 +9,11 @@
   ],
   "scripts": {
     "dev:api": "npm run dev --workspace @fullstack/api",
-    "test": "tsx --test apps/api/test/api.test.ts apps/api/test/products.test.ts apps/api/test/foreign-key.test.ts apps/api/test/money.test.ts apps/api/test/migrate.test.ts",
+    "test": "tsx --test apps/api/test/api.test.ts apps/api/test/products.test.ts apps/api/test/foreign-key.test.ts apps/api/test/money.test.ts apps/api/test/migrate.test.ts apps/api/test/expand.test.ts",
     "typecheck": "tsc --build apps/api packages/shared tsconfig.scripts.json",
     "verify": "npm run typecheck && npm run test",
     "verify:tag": "node scripts/verify-tag.mjs",
+    "backfill": "node scripts/backfill.mjs",
     "db:reset": "node -e \"require('node:fs').rmSync('apps/api/data',{recursive:true,force:true});console.log('数据库已清空，下次启动 api 会重建')\""
   },
   "devDependencies": {

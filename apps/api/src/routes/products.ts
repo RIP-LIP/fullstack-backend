@@ -25,17 +25,34 @@ export const productsRouter = Router()
 type ProductRow = {
   id: number
   sku: string
+  /** 老列，contract 阶段才删 */
   name: string
+  /** ch06 加的新列。回填完成前是 null。 */
+  title: string | null
   price_cents: number
   stock: number
   created_at: string
 }
 
+/**
+ * **双读**：title 有值用 title，没有就退回 name。
+ *
+ * 那个 `?? row.name` 就是整个 expand 阶段的核心。
+ *
+ * 少了它的后果不是报错，是**静默少一个字段**：
+ * 回填没跑完的行 title 是 null，不兜底的话 title 变成 undefined，
+ * 而 JSON.stringify 会把值为 undefined 的键**直接从响应里删掉**。
+ * 调用方拿到一个 200，body 里没有 title，没有任何异常。
+ *
+ * 什么时候能去掉：contract 阶段，老代码确认下线之后。
+ * 前提是回填已经确认跑完——判据是「还有多少行 title IS NULL」为 0。
+ */
 function rowToProduct(row: ProductRow): Product {
   return {
     id: row.id,
     sku: row.sku,
     name: row.name,
+    title: row.title ?? row.name,
     priceCents: row.price_cents,
     stock: row.stock,
     createdAt: row.created_at,
@@ -91,13 +108,24 @@ productsRouter.post(
       throw new HttpError(400, 'VALIDATION_FAILED', '输入不符合要求', flatten(parsed.error))
     }
 
+    // **双写**：title 和 name 一起写，两个值相同。
+    //
+    // 只给一个值不是「省一次写入」，是给另一个版本埋雷：
+    // 回填跑完之后有人删掉一个，第二个版本的数据就成了孤儿。
+    // 两列同生共死，contract 阶段才能一次删干净。
+    //
+    // 允许只给 title 不给 name（反之不行，name 仍是必填），
+    // 这样新调用方可以只用新键，旧调用方也不用改。
+    const name = parsed.data.name
+    const title = parsed.data.title ?? name
+
     const now = new Date().toISOString()
     try {
       const rows = await db.query<ProductRow>(
-        `INSERT INTO products (sku, name, price_cents, stock, created_at)
-         VALUES (?, ?, ?, ?, ?)
+        `INSERT INTO products (sku, name, title, price_cents, stock, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          RETURNING *`,
-        [parsed.data.sku, parsed.data.name, parsed.data.priceCents, parsed.data.stock, now],
+        [parsed.data.sku, name, title, parsed.data.priceCents, parsed.data.stock, now],
       )
       res.status(201).json(rowToProduct(rows[0] as ProductRow))
     } catch (err) {

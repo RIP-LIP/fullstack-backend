@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type { Db } from './index.ts'
 import { m001 } from './migrations/001_init.ts'
 import { m002 } from './migrations/002_add_product_description.ts'
+import { m003 } from './migrations/003_add_product_title.ts'
 
 /**
  * 迁移执行器。
@@ -54,7 +55,7 @@ export function checksumOf(migration: Migration): string {
 }
 
 /** 全部迁移，按版本号排好。显式列出，不去扫目录。 */
-export const allMigrations: readonly Migration[] = [m001, m002]
+export const allMigrations: readonly Migration[] = [m001, m002, m003]
 
 /**
  * 跑到最新版本，返回这次实际执行了哪些版本号。

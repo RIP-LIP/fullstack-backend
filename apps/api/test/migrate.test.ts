@@ -55,11 +55,17 @@ describe('全新库跑迁移', () => {
     const rows = await h.db.query<{ version: number; name: string; checksum: string }>(
       'SELECT version, name, checksum FROM schema_migrations ORDER BY version',
     )
-    assert.equal(rows.length, 2)
-    assert.equal(rows[0]!.version, 1)
-    assert.equal(rows[0]!.name, 'init')
-    assert.equal(rows[1]!.version, 2)
-    assert.equal(rows[1]!.name, 'add_product_description')
+
+    // 对着迁移清单本身断言，不写死条数。写死的话每加一个迁移这条就红一次，
+    // 而那次红跟「迁移有没有跑对」没关系——是测试自己过期了。
+    const { allMigrations } = await import('../src/db/migrate.ts')
+    assert.equal(rows.length, allMigrations.length)
+
+    // 版本号必须和清单一一对上，且连续
+    for (const [i, row] of rows.entries()) {
+      assert.equal(row.version, allMigrations[i]!.version)
+      assert.equal(row.name, allMigrations[i]!.name)
+    }
     assert.ok(rows[0]!.checksum.length > 0, 'checksum 不能是空串')
   })
 

@@ -156,6 +156,82 @@ const CHAPTER_CHECKS = {
       },
     },
   ],
+
+  'v1.2': [
+    {
+      desc: '003 迁移跑完，products 表上 title 和 name 两列都在',
+      run: async (_base, dir) => {
+        const cols = readDb(dir, 'PRAGMA table_info(products)').map((r) => r.name)
+        if (!cols.includes('title')) return `没有 title 列：${JSON.stringify(cols)}`
+        // 这一章不删任何东西。name 还在是 expand 阶段的标志
+        if (!cols.includes('name')) return 'name 被删了，contract 阶段才该删'
+        return true
+      },
+    },
+    {
+      desc: '老数据（title 为 NULL）读出来 title 退回 name，不是 null',
+      run: async (base, dir) => {
+        const id = insertLegacyProduct(dir)
+        const res = await get(`${base}/api/products/${id}`)
+        if (res.status !== 200) return `期望 200，实际 ${res.status}`
+        if (res.body?.title !== '老数据老名字') return `期望「老数据老名字」，实际 ${JSON.stringify(res.body?.title)}`
+        return true
+      },
+    },
+    {
+      desc: '响应里 title 这个键一定在，不会被 JSON.stringify 悄悄删掉',
+      run: async (base, dir) => {
+        const id = insertLegacyProduct(dir)
+        const raw = await (await fetch(`${base}/api/products/${id}`)).text()
+        if (!raw.includes('"title"')) return `响应里没有 title 这个键：${raw}`
+        return true
+      },
+    },
+    {
+      desc: '双写：只给 name，新建的这行 title 也落上同一个值',
+      run: async (base) => {
+        const res = await post(`${base}/api/products`, {
+          sku: `DW-${Date.now()}`,
+          name: '双写验证',
+          priceCents: 100,
+          stock: 1,
+        })
+        if (res.status !== 201) return `期望 201，实际 ${res.status}`
+        if (res.body?.title !== '双写验证') return `title 期望「双写验证」，实际 ${JSON.stringify(res.body?.title)}`
+        return true
+      },
+    },
+    {
+      desc: '删一个已经被订单引用的商品返回 409 PRODUCT_IN_USE',
+      run: async (base, dir) => {
+        await seedOrderReferencingProduct(dir)
+        const res = await del(`${base}/api/products/1`)
+        if (res.status !== 409) return `期望 409，实际 ${res.status}`
+        if (res.body?.error?.code !== 'PRODUCT_IN_USE') return `期望 PRODUCT_IN_USE，实际 ${res.body?.error?.code}`
+        return true
+      },
+    },
+  ],
+}
+
+/**
+ * 往导出目录的库里插一行「有 name、title 为 NULL」的老数据，模拟回填之前的状态
+ * @param {string} dir
+ * @returns {number}
+ */
+function insertLegacyProduct(dir) {
+  const db = new DatabaseSync(join(dir, 'apps', 'api', 'data', 'app.db'))
+  try {
+    const now = new Date().toISOString()
+    const row = /** @type {{id: number}} */ (
+      db
+        .prepare('INSERT INTO products (sku, name, title, price_cents, stock, created_at) VALUES (?, ?, NULL, ?, ?, ?) RETURNING id')
+        .get(`LEGACY-${Date.now()}-${Math.floor(Math.random() * 10000)}`, '老数据老名字', 1000, 5, now)
+    )
+    return row.id
+  } finally {
+    db.close()
+  }
 }
 
 /**

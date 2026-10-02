@@ -9,6 +9,7 @@ apps/api/data/
 .env.local
 
 *.log
+*.err
 .DS_Store
 .vscode/
 .idea/
