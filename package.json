@@ -1,0 +1,20 @@
+{
+  "name": "fullstack-backend",
+  "version": "0.0.0",
+  "private": true,
+  "description": "订单/库存领域后端，Node + Express + TypeScript，配套 fullstack-handbook 的深挖章节",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev --workspace @fullstack/api",
+    "test": "tsx --test apps/api/test/api.test.ts",
+    "verify": "npm run test",
+    "verify:tag": "node scripts/verify-tag.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "license": "MIT"
+}

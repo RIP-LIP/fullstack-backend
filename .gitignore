@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.tsbuildinfo
+
+# SQLite 数据文件：每位读者自己生成，不进版本库
+apps/api/data/
+
+# verify-tag.mjs 导出 tag 时用到的临时目录残留
+.verify-tmp/
+
+.env
+.env.local
+
+*.log
+.DS_Store
+.vscode/
+.idea/
