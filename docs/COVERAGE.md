@@ -2,18 +2,18 @@
 
 这个文件是会话之间的交接依据。换一个会话接着做之前，先读它。
 
-最后更新：S2 完成时
+最后更新：S3 完成时
 
 ## 现在在哪
 
-S2（ch04 数据模型 + ch05 迁移）已完成。ch06 起未开始。
+S3（ch06 零停机变更）已完成。ch07 起未开始。
 
 | 章节 | 主题 | tag | 状态 |
 | --- | --- | --- | --- |
 | — | 立项基线 | `v0.0` | 已完成 |
 | ch04 | 数据模型 | `v1.0` | 已完成 |
 | ch05 | 迁移 | `v1.1` | 已完成 |
-| ch06 | 零停机变更 | `v1.2` | 未开始 |
+| ch06 | 零停机变更 | `v1.2` | 已完成 |
 | ch07 | 事务 | `v1.3` | 未开始 |
 | ch08 | 换 PostgreSQL | `v1.4` | 未开始 |
 | ch09 | 幂等 | `v1.5` | 未开始 |
@@ -22,6 +22,124 @@ S2（ch04 数据模型 + ch05 迁移）已完成。ch06 起未开始。
 | ch12 | 性能 | `v1.8` | 未开始 |
 
 手册侧在 `fullstack-handbook` 的 `docs/guide/deep/`，侧边栏是「后端往下走」第二分组。
+
+## 已经验过的
+
+| 项 | 结果 |
+| --- | --- |
+| `npm run verify` | 退出 0（typecheck + **56 tests** / 0 fail，ch06 前是 47） |
+| `node scripts/verify-tag.mjs v1.2` | 走完八步，56 tests 全跑，**本章检查 5/5**，退出 0 |
+| `node scripts/verify-tag.mjs v1.0` / `v1.1` | 退出 0，各跑当时时点的测试数（35 / 47） |
+| 手册 `npm run verify` | 22 页 593 条站内链接（54 锚点）全部有效 |
+| 三页新文章节 | 200；桌面与窄屏两档都正常 |
+| 计划性/自标榜字样 | ch04 / ch05 / ch06 均为 0 |
+
+## ch06 实跑确认的事实
+
+**JSON.stringify 会删掉值为 undefined 的键。** 直觉做法 `ALTER TABLE ... RENAME COLUMN name TO title`
+跑完之后老代码 `row.name` 是 `undefined`，响应里 `name` **整个键消失**——不报错、不警告：
+
+```
+映射对象里 name 的值: undefined
+序列化后: {"id":1,"sku":"KB-87","priceCents":39900,"stock":25,"createdAt":"..."}
+```
+
+**两种「静默」不一样，别混**：
+
+| 情况 | 映射结果 | JSON 里 |
+| --- | --- | --- |
+| 列还在，值是 NULL | `null` | `"name":null`，键在，看得出不对 |
+| 列被改名/删掉 | `undefined` | **键整个消失**，看不出少了东西 |
+
+双读的 `?? row.name` 只能守第一种；第二种靠的是**别去改列名**。
+
+**「两个版本同时对着一个库」的实测输出**（v1.1 导出到临时目录，`DB_PATH` 指向同一个
+`app.db`，两个端口同时跑）：
+
+```
+v1.2 读 -> {"id":1,"sku":"OLD-1","name":"老商品1","title":"老商品1",...}
+v1.1 读 -> {"id":1,"sku":"OLD-1","name":"老商品1",...}        没有 title 键
+v1.1 写 -> 库里那一行 title 是 null
+v1.2 读 -> {"id":25,...,"title":"老版本写的",...}            ?? 兜住了
+```
+
+**回填脚本踩的两个坑（都是「不报错也不干活」）**：
+
+1. `db.exec()` **不接受绑定参数**。用 `exec()` 跑 `... IN (?,?,?)`，那些问号是未绑定的
+   占位符，值全为 NULL，`id IN (NULL,NULL,NULL)` 匹配不到任何行。语句成功执行、0 行受影响、
+   无异常。换成 `prepare().run(...ids)` 立刻 `changes = 1`。实测：
+   ```
+   用 exec() 跑完（不传参）后: 0 ← 仍然是 0，语句没报错但一行没改
+   用 prepare().run(3) 后: 1  changes = 1
+   ```
+2. **批处理没有「有没有真的推进」的检查**，剩余数不降就无限转，日志刷了 300 多行。
+   已加进度守卫：每批核对剩余数真的少了，没少就报错停下。**批处理最坏的失败不是报错，
+   是不报错也不推进。** 这条对任何批处理脚本都成立。
+
+修好后每批 10 行：10 → 剩 13 → 剩 3 → 剩 0，共 3 批；再跑一遍 0 批 0 改动 0 补错。
+
+**ch05 留下的 ADD COLUMN 边界现在派上用场了**：003 加 `title` 用的就是可空列，
+正因为 002 的注释里记着「有行表上加 NOT NULL 无默认值会失败」。
+
+## 变异测试记录
+
+| 章 | 改坏的地方 | 挂掉的用例 |
+| --- | --- | --- |
+| ch04 | 去掉 DELETE 里的外键 409 翻译 | 1 条：删一个已经被订单引用的商品，返回 409 而不是 500 |
+| ch04 | `rowToProduct` 里 `price_cents` 除以 100 | 3 条 |
+| ch05 | 关掉迁移的 checksum 校验 | 2 条 |
+| **ch06** | **双读里的 `?? row.name` 去掉** | **1 条**：老数据 title 退回 name |
+| **ch06** | **`INSERT` 少写 `title` 一列** | **3 条**：双写两条 + 老代码视角一条 |
+
+**ch06 两次抓到的用例不重叠**，说明双读和双写各自被独立守住，不是同一批断言在空转。
+
+## 载体状态
+
+```
+apps/api/src/db/index.ts       Db 接口（query / one / transaction 三个方法）
+apps/api/src/db/sqlite.ts     node:sqlite 实现 + createDb 工厂 + 模块顶层 await migrate
+apps/api/src/db/migrate.ts    迁移执行器（版本表 + checksum + 每迁移一事务）
+apps/api/src/db/migrations/   001_init / 002_add_product_description / 003_add_product_title
+apps/api/src/routes/          products.ts、async-handler.ts
+apps/api/test/                harness.ts + 6 个测试文件
+scripts/backfill.mjs          ch06 的分批回填（幂等 + 可中断 + 进度守卫）
+```
+
+`products` 表现在 8 列：`id / sku / name / title / price_cents / stock / created_at / description`。
+`name` 和 `title` 并存是**故意的**——expand 阶段不删任何东西。
+
+`migrate.test.ts` 里断言迁移条数的那条**已改成对着 `allMigrations.length` 比**，
+不再写死数字。以后加迁移不会再因为「条数变了」而红一次。
+
+## 下一步：S4 做 ch07 事务
+
+ch07 要处理「建订单同时动三张表」。`Db.transaction` 已经在 `sqlite.ts` 里实现好了，直接用。
+
+**载体上要注意的**：`orders` 和 `order_items` 两张表建了但**没有接口**（ch04 只做了
+products）。ch07 得先把建订单的路径写出来，代码量比 ch06 大。
+
+订单状态机的取值域已被 `CHECK` 钉住（`pending` / `paid` / `shipped` / `completed` /
+`cancelled`），但**转移规则还没实现**——那是 ch07 的核心内容。
+
+## 硬约束
+
+改动之前先看这几条，它们不随会话变化：
+
+- zod 钉 `~3.25.76`，不升 v4
+- 端口 3002，不复用 3001
+- `config.ts` 只放代码真的读到的键
+- 数据访问层不按实体建 repository
+- 文档不写「待写 / 待补 / 还没写」，不写「我们只讲 X 不讲 Y」这类句子
+- 文档里的每条命令标明是否改动数据
+- `::: request` 容器里的响应必须实跑抓取，不能凭印象写
+- **文档里举的每个例子都要实跑确认过**。会错和不会错的例子要分开写清楚
+- **交接文档里的行为断言要带本会话跑出来的命令和输出**
+- 每章收尾做变异测试，把挂掉的用例名写进 commit message
+- 加测试文件后要改根 `package.json` 的 `test` 脚本（显式列文件名），
+  并确认 `npm test` 的**测试条数涨了**。没涨就是没跑到
+- **commit message 里不要出现双引号**——PowerShell 会把它截断，git 收到乱参数。
+  写进文件用 `git commit -F 文件`，文件也**别放在仓库里**（会被 `git add -A` 带进去），
+  放 `%TEMP%`
 
 ## 已经验过的
 
