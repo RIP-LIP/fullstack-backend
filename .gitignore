@@ -1,6 +1,7 @@
 node_modules/
 dist/
 *.tsbuildinfo
+verify-out/
 
 # SQLite 数据文件：每位读者自己生成，不进版本库
 apps/api/data/

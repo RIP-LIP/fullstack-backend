@@ -31,6 +31,10 @@ const repoRoot = resolve(here, '..')
 const HEALTH_TIMEOUT_MS = 30_000
 const POLL_INTERVAL_MS = 300
 
+/** 装依赖和跑测试的上限。两个都给，不然网络卡住或测试死锁时脚本会无限挂住。 */
+const INSTALL_TIMEOUT_MS = 300_000
+const TEST_TIMEOUT_MS = 120_000
+
 const tag = process.argv[2]
 if (!tag) {
   console.error('用法：node scripts/verify-tag.mjs <tag>')
@@ -68,11 +72,19 @@ try {
   const hasLock = existsSync(join(workDir, 'package-lock.json'))
   console.log(`   执行：${hasLock ? 'npm ci' : 'npm install'}`)
   const install = npmArgs(hasLock ? ['ci'] : ['install'])
-  execFileSync(install.cmd, install.args, { cwd: workDir, stdio: 'inherit' })
+  execFileSync(install.cmd, install.args, {
+    cwd: workDir,
+    stdio: 'inherit',
+    timeout: INSTALL_TIMEOUT_MS,
+  })
 
   step('跑测试')
   const test = npmArgs(['test'])
-  execFileSync(test.cmd, test.args, { cwd: workDir, stdio: 'inherit' })
+  execFileSync(test.cmd, test.args, {
+    cwd: workDir,
+    stdio: 'inherit',
+    timeout: TEST_TIMEOUT_MS,
+  })
 
   step('起服务并等健康检查通过')
   // 自己找一个空端口，不用 3002——那可能正被你自己开着的服务占着，
@@ -108,6 +120,11 @@ try {
 } catch (err) {
   if (err instanceof Error && err.message === 'FAIL') {
     process.exitCode = 1
+  } else if (isTimeout(err)) {
+    // 超时不是「测试失败」，是「根本没跑完」。两种都得退出 1，
+    // 但要分得清，否则看到超时的人会以为代码有问题。
+    console.error(`\n失败：命令超时，没跑完就中断了。${describeTimeout(err)}`)
+    process.exitCode = 1
   } else {
     console.error('\n复现过程中出错：', err)
     process.exitCode = 1
@@ -133,6 +150,16 @@ try {
 
 function step(msg) {
   console.log(`\n▸ ${msg}`)
+}
+
+/** execFileSync 超时抛的错带 code: 'ETIMEDOUT'，signal 可能是 SIGTERM */
+function isTimeout(err) {
+  return typeof err === 'object' && err !== null && (err as { code?: string }).code === 'ETIMEDOUT'
+}
+
+function describeTimeout(err) {
+  const e = err as { syscall?: string; signal?: string }
+  return `（${e.syscall ?? '命令'} 收到 ${e.signal ?? 'SIGTERM'}，上限 ${INSTALL_TIMEOUT_MS / 1000} / ${TEST_TIMEOUT_MS / 1000} 秒）`
 }
 
 /**

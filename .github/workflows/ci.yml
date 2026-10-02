@@ -8,12 +8,12 @@ on:
 
 jobs:
   test:
-    # node:sqlite 需要 Node 22.5+，所以矩阵下限取 22
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        node: ['22', '24']
+        # 下限取 22.13，不是 22：node:sqlite 到 22.13 才去掉 --experimental-sqlite 标志
+        node: ['22.13', '24']
 
     steps:
       - uses: actions/checkout@v4
@@ -25,6 +25,9 @@ jobs:
 
       - name: 安装依赖
         run: npm ci
+
+      - name: 类型检查
+        run: npm run typecheck
 
       - name: 跑测试
         run: npm test
