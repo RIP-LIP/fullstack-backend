@@ -23,6 +23,34 @@ import { Client } from 'pg'
 const DB_URL = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/orders'
 const dbName = new URL(DB_URL).pathname.replace(/^\//, '')
 
+/**
+ * 碰都不能碰的三个库。
+ *
+ * `postgres` 是官方镜像自带的、连上去执行 DROP 的那个；
+ * `template0` / `template1` 是建新库的模板。
+ * 这三个删掉之后，PostgreSQL 实例就废了——不是「数据没了」，
+ * 是「连不上了」，恢复要走官方文档重来。
+ *
+ * **为什么这里需要一道名字闸，而 `drop-test-dbs.mjs` 用的是白名单：**
+ * 那两个脚本的破坏力是对称的——`db:reset` 删的是**你自己的开发库**，
+ * 这是它的用途；`drop-test-dbs` 删的是**测试库**，也是它的用途。
+ * 但 `db:reset` 认的是 `DATABASE_URL`，那个环境变量可能指向任何地方：
+ * 同事的库、CI 的库、某个生产只读副本的连接串。
+ * 一旦指错，`--yes` 一次就不可恢复。
+ *
+ * 所以它需要的是**拒绝指定的几个**，不是「只允许某个模式」——
+ * 开发库的库名是项目定的，不该由这个脚本规定。
+ */
+const FORBIDDEN = new Set(['postgres', 'template0', 'template1'])
+
+if (FORBIDDEN.has(dbName)) {
+  console.error(`拒绝执行：${dbName} 不能删。`)
+  console.error('  postgres     是执行 DROP 时连的那个库本身')
+  console.error('  template0/1  是建新库的模板，删掉整个实例就废了')
+  console.error('如果 DATABASE_URL 指错了，改对之后再跑。')
+  process.exit(1)
+}
+
 if (!process.argv.includes('--yes')) {
   console.error(`这会删掉整个数据库：${dbName}`)
   console.error('里面的表、迁移记录、数据全都没了，而且恢复不了。')

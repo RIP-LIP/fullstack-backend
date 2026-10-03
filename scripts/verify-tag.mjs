@@ -76,8 +76,19 @@ function dialectFor(t) {
 
 const DIALECT = dialectFor(tag)
 const PG_BASE_URL = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/orders'
-/** 这次复现专属的库名，跑完删掉。 */
-const PG_DB_NAME = `verify_${tag.replace(/\./g, '_')}`
+/**
+ * 这次复现专属的库名，跑完删掉。
+ *
+ * **名字里必须有 `_test`。** 清理脚本 `drop-test-dbs.mjs` 认的是
+ * `LIKE '%\_test%'`，它自己的那道闸也只认 `_test`。
+ * 这个库名早先叫 `verify_v1_4`——不含 `_test`，于是强停进程、
+ * 断电、或者 `finally` 没跑到的时候，库就永远留在那儿，
+ * 而且**清理脚本永远清不掉它**。下一次跑 verify-tag 会 DROP+CREATE
+ * 同一个名字，跨会话互相干扰。
+ *
+ * 所以命名跟着清理脚本的判据走，不是跟着「这个库是干什么的」走。
+ */
+const PG_DB_NAME = `verify_${tag.replace(/\./g, '_')}_test`
 /** 这次复现给服务用的连接串。null 表示这次是 SQLite。 */
 /** @type {string | null} */
 let pgUrl = null

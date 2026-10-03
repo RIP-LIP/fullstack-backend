@@ -2,7 +2,7 @@ import { test, describe, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { startHarness, createProduct, createUser } from './harness.ts'
 import type { Harness } from './harness.ts'
-import { canonicalize, requestHash } from '../src/idempotency.ts'
+import { canonicalize, requestHash, reclaimStale } from '../src/idempotency.ts'
 
 /**
  * 幂等。
@@ -276,5 +276,89 @@ describe('参数不合法时', () => {
       key,
     ])
     assert.equal(row?.n, 0, '参数不合法就不该占键')
+  })
+})
+
+/**
+ * 回收「卡在进行中」的孤儿键。
+ *
+ * 这个场景没有接口能触发——需要进程在 claim 提交之后、
+ * 订单事务提交之前被杀。测试用直接改 created_at 来模拟那一刻的结果：
+ * 那一行还在，order_id 还是空的。
+ */
+describe('过期键的回收', () => {
+  test('超过 TTL 且还没完成的键被删掉', async () => {
+    const key = freshKey()
+    await h.db.query('INSERT INTO idempotency_keys (key, request_hash, order_id, created_at) VALUES (?, ?, NULL, ?)', [
+      key,
+      'hash',
+      // 两小时前
+      new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    ])
+
+    const removed = await reclaimStale(h.db, 10 * 60 * 1000)
+    assert.ok(removed >= 1, '这一行早过了 TTL，应该被删')
+
+    const row = await h.db.one<{ n: number }>('SELECT COUNT(*)::int AS n FROM idempotency_keys WHERE key = ?', [key])
+    assert.equal(row?.n, 0)
+  })
+
+  test('**没超时的键不删**——刚 claim 成功的那一行也是 NULL', async () => {
+    const key = freshKey()
+    await h.db.query('INSERT INTO idempotency_keys (key, request_hash, order_id, created_at) VALUES (?, ?, NULL, ?)', [
+      key,
+      'hash',
+      new Date().toISOString(),
+    ])
+
+    await reclaimStale(h.db, 10 * 60 * 1000)
+
+    const row = await h.db.one<{ n: number }>('SELECT COUNT(*)::int AS n FROM idempotency_keys WHERE key = ?', [key])
+    assert.equal(row?.n, 1, '刚 claim 的键不能被回收，否则等于没有幂等')
+  })
+
+  test('**已完成的键永不删**，哪怕很旧', async () => {
+    // 这是最重要的一条：删掉一个已完成的键，下一次重放会重新执行，
+    // 订单建两笔、库存扣两次——正好是这一整章在防的事。
+    // order_id 有外键，得先有一笔真实的订单，不能随手填 999。
+    const p = await createProduct(h.baseUrl, { priceCents: 1000, stock: 10 })
+    const created = await postOrder({ userId, items: [{ productId: p.id, quantity: 1 }] })
+    assert.equal(created.status, 201)
+    const orderId = ((await created.json()) as { id: number }).id
+
+    const key = freshKey()
+    await h.db.query('INSERT INTO idempotency_keys (key, request_hash, order_id, created_at) VALUES (?, ?, ?, ?)', [
+      key,
+      'hash',
+      orderId,
+      new Date(Date.now() - 10 * 24 * 60 * 60 * 1000).toISOString(),
+    ])
+
+    await reclaimStale(h.db, 10 * 60 * 1000)
+
+    const row = await h.db.one<{ n: number }>('SELECT COUNT(*)::int AS n FROM idempotency_keys WHERE key = ?', [key])
+    assert.equal(row?.n, 1, '已完成且写了 order_id 的行必须留着')
+  })
+
+  test('回收之后同一个键可以重新用', async () => {
+    const key = freshKey()
+    const body = { userId, items: [] as unknown[] }
+    // 先占一个「卡住」的键
+    await h.db.query('INSERT INTO idempotency_keys (key, request_hash, order_id, created_at) VALUES (?, ?, NULL, ?)', [
+      key,
+      requestHash(canonicalize(body)),
+      new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+    ])
+
+    // 没回收之前，同键重放拿不到结果
+    const stuck = await postOrder({ userId, items: [{ productId: 1, quantity: 1 }] }, key)
+    assert.equal(stuck.status, 409, '键卡住的时候应该 409')
+
+    await reclaimStale(h.db, 10 * 60 * 1000)
+
+    // 回收之后，这个键能被重新认领
+    const p = await createProduct(h.baseUrl, { priceCents: 1000, stock: 10 })
+    const res = await postOrder({ userId, items: [{ productId: p.id, quantity: 1 }] }, key)
+    assert.equal(res.status, 201, '回收之后同一个键应该能重新用')
   })
 })

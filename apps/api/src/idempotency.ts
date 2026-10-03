@@ -168,3 +168,51 @@ export async function release(db: Db, key: string): Promise<void> {
   // 失败不抛：还键是善后，不是主流程。抛出去会盖掉真正的错误。
   await db.query('DELETE FROM idempotency_keys WHERE key = ? AND order_id IS NULL', [key]).catch(() => {})
 }
+
+/**
+ * 回收「卡在进行中」的孤儿键。
+ *
+ * ## 为什么需要它
+ *
+ * `release` 只在 catch 里跑。进程如果在这两步之间被 SIGKILL 或 OOM 杀掉——
+ * `claim` 的 INSERT 已经提交了，订单事务还没提交——`release` 永远等不到。
+ * 那一行就停在 `order_id IS NULL`，之后每次同键重试都返回
+ * `IDEMPOTENT_REQUEST_IN_PROGRESS`，**这次意图永久报废**。
+ *
+ * 这不是理论问题：部署、回滚、机器重启都会走到它。
+ *
+ * ## 回收条件为什么是这两个
+ *
+ * - `order_id IS NULL`：已完成的那一行**绝不能删**。删了的话下一次重放
+ *   会重新执行一遍，订单建两笔、库存扣两次——正好是这一整章在防的事。
+ * - 超过 TTL：刚 claim 成功的键也是 NULL，删了就等于没有幂等。
+ *   TTL 必须比「一次请求的最长处理时间」长得多。
+ *
+ * ## 和索引的关系
+ *
+ * `002_idempotency_keys.ts` 建了 `idx_idempotency_keys_created_at`，
+ * 注释写着「过期清理要用这个」。在这个函数出现之前，**那是一个死索引**——
+ * 建它的理由还不存在。
+ *
+ * ## 谁来调
+ *
+ * 本项目**没有定时任务**，也不打算为了这一件事引入一个。
+ * 所以它是一个导出函数，由外部决定调用时机——生产环境挂个 cron，
+ * 测试里直接调。放在这里是因为「哪些行可以安全删」这个判断
+ * 和 claim / complete / release 是同一套语义，不该散在两个地方。
+ *
+ * @param db
+ * @param ttlMs 判定为「卡住」的时间。默认 10 分钟。
+ * @returns 删掉了几行
+ */
+export async function reclaimStale(
+  db: Db,
+  ttlMs: number = 10 * 60 * 1000,
+): Promise<number> {
+  const cutoff = new Date(Date.now() - ttlMs).toISOString()
+  const deleted = await db.query<{ key: string }>(
+    'DELETE FROM idempotency_keys WHERE order_id IS NULL AND created_at < ? RETURNING key',
+    [cutoff],
+  )
+  return deleted.length
+}
