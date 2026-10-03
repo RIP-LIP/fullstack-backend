@@ -23,7 +23,7 @@
 
 import { Client, Pool } from 'pg'
 
-const URL = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/orders'
+const DB_URL = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/orders'
 
 /**
  * 显式 barrier：N 个参与者都到了才放行。
@@ -78,7 +78,7 @@ async function stockOf(client, id) {
 
 /** @returns {Promise<Client>} */
 async function connect() {
-  const client = new Client({ connectionString: URL })
+  const client = new Client({ connectionString: DB_URL })
   await client.connect()
   return client
 }
@@ -290,7 +290,7 @@ async function pool() {
   head('场景四：连接池耗尽时是什么样')
 
   // 特意开一个 max=1 的池，这样一条连接就能演示清楚。
-  const small = new Pool({ connectionString: URL, max: 1 })
+  const small = new Pool({ connectionString: DB_URL, max: 1 })
 
   // 把唯一那条借走，攥在事务里不放
   const held = await small.connect()

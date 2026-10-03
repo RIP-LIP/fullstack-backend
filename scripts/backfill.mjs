@@ -36,7 +36,7 @@
 
 import { Client } from 'pg'
 
-const URL = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/orders'
+const DB_URL = process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/orders'
 
 const args = process.argv.slice(2)
 const batchArg = args.find((a) => a.startsWith('--batch='))
@@ -71,11 +71,11 @@ async function remaining(client) {
   return res.rows[0].n
 }
 
-const client = new Client({ connectionString: URL })
+const client = new Client({ connectionString: DB_URL })
 try {
   await client.connect()
 } catch (err) {
-  console.error(`连不上数据库：${URL}`)
+  console.error(`连不上数据库：${DB_URL}`)
   console.error('先 docker compose up -d。')
   console.error(err instanceof Error ? err.message : String(err))
   process.exit(1)
@@ -95,7 +95,7 @@ if (!names.includes('title')) {
 }
 
 let total = await remaining(client)
-console.log(`数据库：${URL}`)
+console.log(`数据库：${DB_URL}`)
 console.log(`每批：${BATCH} 行`)
 console.log(`待回填：${total} 行`)
 

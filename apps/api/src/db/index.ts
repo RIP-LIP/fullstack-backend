@@ -5,7 +5,7 @@
  * 有意只暴露三个方法：一个多行查询、一个单行查询、一个事务。
  *
  * 为什么这么少：这一层存在的唯一理由，是让「换一个数据库」这件事
- * 变成只改一个文件（db/sqlite.ts）。如果它长出
+ * 变成只改数据层的实现文件。如果它长出
  * OrderRepository / ProductRepository，就变成了另一件事——
  * 那是每个项目都要重新设计一次的抽象层，收益抵不上成本。
  * 等真出现第二种数据访问需求时再加，那时才知道该长什么样。
@@ -18,20 +18,8 @@
  * 写入天然串行。async 只是接口形状，不是并发方案。
  */
 
-/** 能绑进 SQL 占位符的值。和 node:sqlite 的支持范围一致。 */
+/** 能绑进 SQL 占位符的值。 */
 export type Param = string | number | bigint | null | Uint8Array
-
-/**
- * 底层是哪个数据库。
- *
- * 业务代码**不分支**——它只见 `Db` 这个接口。
- * 只有两类地方看这个值：`scripts/` 里那些要直接连库的工具，
- * 和测试里那些需要知道「PRAGMA 还是 information_schema」的断言。
- *
- * 之所以还要留这个类型：换库之后 SQLite 那边并没有从历史里消失，
- * `verify-tag` 要能复现 v1.0 到 v1.3，它得知道自己该用哪一套工具。
- */
-export type Dialect = 'sqlite' | 'postgres'
 
 export interface Db {
   /** 返回多行。查不到就是空数组。写入语句用 RETURNING，靠它拿回新行。 */

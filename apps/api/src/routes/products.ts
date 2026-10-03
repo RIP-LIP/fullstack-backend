@@ -97,8 +97,8 @@ productsRouter.get(
  * POST /api/products —— 新建
  *
  * 插入用 RETURNING *，一次往返就拿到新行，不用再查一次。
- * RETURNING 需要 SQLite 3.35+，本机的 node:sqlite 满足
- * （同版本才有的 ALTER TABLE DROP COLUMN 也能用，可以互相印证）。
+ * `RETURNING` 在 PostgreSQL 上是原生支持的——SQLite 要 3.35+ 才有，
+ * 那段限制随换库一起过去了。
  */
 productsRouter.post(
   '/products',

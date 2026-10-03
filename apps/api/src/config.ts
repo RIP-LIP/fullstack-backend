@@ -15,9 +15,9 @@ export const PORT = Number(process.env.PORT ?? 3002)
  * 默认值指向 `docker compose up -d` 起出来的那个容器。
  * 换过端口或密码就传 DATABASE_URL 进来。
  *
- * **测试用的那个库名必须以 `_test` 结尾**，这是 `db/postgres.ts` 里的
- * 安全闸会检查的东西：测试永远不该碰到开发库，而「靠记得别连错」
- * 显然靠不住。
+ * **测试用的那个库名必须以 `_test` 结尾**，这是
+ * `apps/api/test/test-db.ts` 里 `assertTestDatabase` 会检查的东西：
+ * 测试永远不该碰到开发库，而「靠记得别连错」显然靠不住。
  */
 export const DATABASE_URL =
   process.env.DATABASE_URL ?? 'postgres://postgres:postgres@127.0.0.1:5432/orders'
