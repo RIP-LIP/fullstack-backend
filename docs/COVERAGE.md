@@ -339,8 +339,9 @@ scripts/                         verify-tag / race / backfill / reset-db / probe
 
 ### 方向二：发布
 
-全部完成、审阅之后单独决定。**这里只写与本项目有关的两条经验**，
-建仓和推送的通用步骤不在这一份里。
+**三个仓已发布**（`RIP-LIP/fullstack-handbook` / `fullstack-todo-app` / `fullstack-backend`，
+均为 public，issues 已关），handbook 走 GitHub Pages 上线。
+**这里只写与本项目有关的三条经验**，建仓和推送的通用步骤不在这一份里。
 
 **一、凭据不是「登录了就能用」。** `gh auth status` 可能同时列出两套凭据：
 一个来自环境变量（`GH_TOKEN`）、一个来自系统 keyring。
@@ -364,6 +365,19 @@ gh auth status
 ```powershell
 git config http.proxy http://<你的代理地址>:<端口>   # repo 级，不加 --global
 ```
+
+**三、Pages 站点要先存在，第一次 push 一定失败。**
+仓库里有 `deploy.yml` 并不等于 Pages 开着。首次 push 触发的那个 run
+会在 `configure-pages` 报 `Not Found`——**因为站点还没建**。
+而 `PUT .../pages` 是「更新」，对不存在的站点返回 404，得用 `POST` 建一次：
+
+```powershell
+gh api -X POST repos/<owner>/<repo>/pages -f build_type=workflow
+gh workflow run deploy.yml --repo <owner>/<repo>     # 再手动触发一次
+```
+
+建站成功会返回 `html_url` 和 `build_type`，那个 `html_url` 就是站点地址。
+`POST` 之后再 `PUT` 才有效。
 
 **推送之前要确认两件事**：测试用的库全在容器里（`pg_database` 是容器内的东西，
 代码推不走它），以及 `apps/api/data/` 已经在 `.gitignore` 里。
