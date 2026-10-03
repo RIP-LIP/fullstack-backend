@@ -66,11 +66,18 @@ export const CreateProductInput = z.object({
   priceCents: z
     .number({ required_error: '价格不能为空', invalid_type_error: '价格必须是数字' })
     .int('价格必须是以分计的整数，不能是小数')
-    .min(0, '价格不能是负数'),
+    .min(0, '价格不能是负数')
+    // 上界不是「数据库装不下才设」，是**错误该在这一层暴露**。
+    // 列是 int4（上限 2147483647），真写进去数据库会报 22003。
+    // 但那时已经开过事务、回滚过一次，客户端拿到的还是一句「服务端出错了」。
+    // 在这一层挡住，错误就是「价格超出允许范围」，客户端知道自己该改什么。
+    // 100 万分 = 1 万元，对本载体够用；真要更大就该换 bigint 列，那要另开一章。
+    .max(100_000_000, '价格超出允许范围'),
   stock: z
     .number({ required_error: '库存不能为空', invalid_type_error: '库存必须是数字' })
     .int('库存必须是非负整数')
-    .min(0, '库存不能是负数'),
+    .min(0, '库存不能是负数')
+    .max(1_000_000, '库存超出允许范围'),
 })
 
 export type CreateProductInput = z.infer<typeof CreateProductInput>

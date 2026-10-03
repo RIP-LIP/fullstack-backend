@@ -67,6 +67,7 @@ export type ConstraintKind =
   | 'unique' // 唯一键：sku / email 重复，**以及主键冲突**
   | 'check' // CHECK：值不在允许范围内
   | 'notnull' // NOT NULL：必填列写成了空
+  | 'outofrange' // 22003：数字超出列的类型范围
   | 'other' // 是约束错误，但属于上面没列出的那一类里的其他码
 
 /**
@@ -100,6 +101,13 @@ export function constraintKind(err: unknown): ConstraintKind | null {
 
   const code = (err as { code?: unknown }).code
   if (typeof code !== 'string') return null
+
+  // **这一类不在 23 里面，但同样是「客户端传错了」。**
+  // 22003 numeric_value_out_of_range：往 int4 列里写了一个超出范围的数。
+  // 漏掉它的话，客户端传一个超大价格会拿到 500「服务端出错了」，
+  // 而原因完全在它自己手上——这正是上面说的「误判成服务端故障」。
+  // 所以在 23 那一整类之前先单独接住它。
+  if (code === '22003') return 'outofrange'
 
   // SQLSTATE 的类（class）是前两位。23 是 integrity_constraint_violation，
   // 所有完整性约束失败都在这一类里，剩下的两位才区分是哪一条。

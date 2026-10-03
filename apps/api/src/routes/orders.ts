@@ -18,6 +18,17 @@ import { IDEMPOTENCY_HEADER, claim, complete, release, requestHash } from '../id
 
 export const ordersRouter = Router()
 
+/**
+ * 一笔订单的金额上限，单位是分。
+ *
+ * `orders.total_cents` 是 int4，上限 2147483647。取一半当业务上限，
+ * 留出的余量是给「以后给这一列换个语义」用的，不是给溢出兜底的。
+ *
+ * 为什么需要它：单项的上界在 zod 里，**合计的上界只能在这里**——
+ * 合计是相乘加出来的结果，没有任何一条单字段校验能提前判断它。
+ */
+const MAX_TOTAL_CENTS = 1_000_000_000
+
 type OrderRow = {
   id: number
   user_id: number
@@ -164,6 +175,22 @@ async function createOrderInTx(tx: Db, input: CreateOrderInput): Promise<Order> 
   }
 
   const totalCents = lines.reduce((sum, l) => sum + l.price * l.quantity, 0)
+
+  // **合计的溢出，zod 那一层管不了。**
+  // 单价和数量各自都有上界，但它们是相乘再加的：50 项 × 999 件 × 100 万分
+  // 仍然远超 int4。不在这里挡，数据库会报 22003，事务回滚，
+  // 客户端拿到一句「服务端出错了」——原因完全在它自己发的请求里。
+  //
+  // 判据用「一项都放不下」而不是「快到了」：int4 的上限是 2147483647，
+  // 这里留一半 余量。真正的修法是给这一列换 bigint，那是另一件事。
+  if (!Number.isSafeInteger(totalCents) || totalCents > MAX_TOTAL_CENTS) {
+    throw new HttpError(
+      400,
+      'ORDER_TOTAL_TOO_LARGE',
+      `订单金额超出允许范围（最多 ${MAX_TOTAL_CENTS} 分）`,
+    )
+  }
+
   const now = new Date().toISOString()
 
   const created = await tx.query<OrderRow>(

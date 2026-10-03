@@ -331,3 +331,36 @@ test('状态机：转移表和接口表现一致', async () => {
     }
   }
 })
+
+// 金额上界。单项的上界在 zod 里，**合计的上界只能在这里**——
+// 合计是相乘加出来的结果，没有任何单字段校验能提前判断它。
+// 少了这道护栏：50 项 x 999 件 x 100 万分 = 499500000000，
+// 远超 int4 的 2147483647，数据库报 22003，事务回滚，客户端拿到 500。
+test('合计超上限时返回 400，订单没有建出来', async () => {
+  const before = await countOf('SELECT COUNT(*)::int AS n FROM orders')
+  // 库存给足，别让请求先撞上 OUT_OF_STOCK——
+  // 那会证明库存这道关卡在，不证明金额那道。两条路径要各测各的。
+  const p = await createProduct(h.baseUrl, { priceCents: 100_000_000, stock: 1_000_000 })
+
+  const res = await postOrder({
+    userId,
+    items: Array.from({ length: 11 }, () => ({ productId: p.id, quantity: 999 })),
+  })
+
+  assert.equal(res.status, 400, '应该被 400 挡住，不是 500')
+  const body = (await res.json()) as ErrorBody
+  assert.equal(body.error.code, 'ORDER_TOTAL_TOO_LARGE')
+
+  // 关键：不能只断言状态码。500 兜底和 400 都是「没建出来」，
+  // 但前者说明错误被误判成服务端故障了。
+  const after = await countOf('SELECT COUNT(*)::int AS n FROM orders')
+  assert.equal(after, before, '订单不该被建出来')
+})
+
+test('合计刚好在上限内时正常建单', async () => {
+  const p = await createProduct(h.baseUrl, { priceCents: 100_000_000, stock: 10_000 })
+  const res = await postOrder({ userId, items: [{ productId: p.id, quantity: 9 }] })
+  assert.equal(res.status, 201)
+  const body = (await res.json()) as OrderBody
+  assert.equal(body.totalCents, 900_000_000)
+})

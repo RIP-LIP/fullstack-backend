@@ -51,6 +51,23 @@ describe('CreateProductInput', () => {
     assert.equal(firstMessage(parsed), '价格不能是负数')
   })
 
+  // 下面两条盯的是「错误在哪一层暴露」。
+  // 少了上界，2147483648 会通过校验，然后在 INSERT 时让数据库报 22003，
+  // 事务回滚，客户端拿到 500——原因完全在它自己发的请求里。
+  test('拒绝超出 int4 范围的价格，在这一层就挡住', () => {
+    const parsed = CreateProductInput.safeParse({ ...valid, priceCents: 2147483648 })
+    assert.equal(firstMessage(parsed), '价格超出允许范围')
+  })
+
+  test('接受刚好等于上界的整数分', () => {
+    assert.equal(CreateProductInput.safeParse({ ...valid, priceCents: 100_000_000 }).success, true)
+  })
+
+  test('库存同样有上界', () => {
+    const parsed = CreateProductInput.safeParse({ ...valid, stock: 1_000_001 })
+    assert.equal(firstMessage(parsed), '库存超出允许范围')
+  })
+
   test('title 是可选的：expand 阶段老调用方只传 name', () => {
     assert.equal(CreateProductInput.safeParse(valid).success, true)
   })
